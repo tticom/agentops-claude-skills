@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import pytest
+
+import validate_skills
+from validate_skills import validate_repository
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+GOOD_SKILL = """---
+name: {name}
+description: Use when validating a fixture skill.
+---
+
+# {name}
+"""
+
+
+def write(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def make_repo(tmp_path: Path, skills: tuple[str, ...] = ("alpha",), index: tuple[str, ...] | None = None) -> Path:
+    listed = skills if index is None else index
+    entries = "\n".join(f"- `{name}` - fixture" for name in listed)
+    write(
+        tmp_path / "README.md",
+        f"# fixture\n\n{validate_skills.README_START}\n{entries}\n{validate_skills.README_END}\n",
+    )
+    (tmp_path / "skills").mkdir()
+    for name in skills:
+        write(tmp_path / "skills" / name / "SKILL.md", GOOD_SKILL.format(name=name))
+    return tmp_path
+
+
+def codes(root: Path) -> list[str]:
+    issues, _ = validate_repository(root)
+    return [issue.code for issue in issues]
+
+
+def test_repository_itself_is_valid() -> None:
+    issues, _ = validate_repository(REPO_ROOT)
+    assert [issue.render() for issue in issues] == []
+
+
+def test_empty_scaffold_is_valid(tmp_path: Path) -> None:
+    make_repo(tmp_path, skills=())
+    assert codes(tmp_path) == []
+
+
+def test_valid_skill_passes(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    assert codes(tmp_path) == []
+
+
+def test_cli_exit_status(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    make_repo(tmp_path)
+    assert validate_skills.main(["--root", str(tmp_path)]) == 0
+    assert "OK: 1 skill(s)" in capsys.readouterr().out
+    (tmp_path / "skills" / "alpha" / "SKILL.md").unlink()
+    assert validate_skills.main(["--root", str(tmp_path)]) == 1
+    assert "SKILL_MD_MISSING" in capsys.readouterr().err
+
+
+def test_missing_skills_directory(tmp_path: Path) -> None:
+    write(tmp_path / "README.md", "# x\n")
+    assert codes(tmp_path) == ["SKILLS_DIR_MISSING"]
+
+
+def test_missing_frontmatter(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/SKILL.md", "# no frontmatter\n")
+    assert codes(tmp_path) == ["FRONTMATTER_MISSING"]
+
+
+def test_unterminated_frontmatter(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/SKILL.md", "---\nname: alpha\ndescription: x\n")
+    assert codes(tmp_path) == ["FRONTMATTER_UNTERMINATED"]
+
+
+def test_name_must_match_directory(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/SKILL.md", GOOD_SKILL.format(name="beta"))
+    assert codes(tmp_path) == ["FRONTMATTER_NAME_MISMATCH"]
+
+
+@pytest.mark.parametrize("name", ["Alpha", "al_pha", "-alpha", "a" * 65])
+def test_invalid_names(tmp_path: Path, name: str) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/SKILL.md", f"---\nname: {name}\ndescription: ok\n---\n")
+    assert codes(tmp_path) == ["FRONTMATTER_NAME_INVALID"]
+
+
+def test_description_required_and_bounded(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/SKILL.md", "---\nname: alpha\n---\n")
+    assert codes(tmp_path) == ["FRONTMATTER_DESCRIPTION_MISSING"]
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        f"---\nname: alpha\ndescription: {'x' * 1025}\n---\n",
+    )
+    assert codes(tmp_path) == ["FRONTMATTER_DESCRIPTION_TOO_LONG"]
+
+
+def test_unquoted_colon_in_plain_scalar_is_rejected(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        "---\nname: alpha\ndescription: Use when: something happens\n---\n",
+    )
+    assert codes(tmp_path) == ["FRONTMATTER_SYNTAX"]
+
+
+def test_quoted_and_block_scalars_are_accepted(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        '---\nname: alpha\ndescription: "Use when: quoted"\nnotes: >\n  folded: text\n  more\n---\n',
+    )
+    assert codes(tmp_path) == []
+
+
+def test_duplicate_frontmatter_key(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        "---\nname: alpha\ndescription: a\ndescription: b\n---\n",
+    )
+    assert codes(tmp_path) == ["FRONTMATTER_DUPLICATE_KEY"]
+
+
+def test_directory_without_skill_md(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    (tmp_path / "skills/beta").mkdir()
+    assert sorted(codes(tmp_path)) == ["SKILL_MD_MISSING", "SKILL_NOT_ADVERTISED"]
+
+
+def test_stray_file_in_skills_root(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/notes.md", "x")
+    assert codes(tmp_path) == ["STRAY_FILE"]
+
+
+def test_readme_index_must_match_directories(tmp_path: Path) -> None:
+    make_repo(tmp_path, skills=("alpha",), index=("alpha", "ghost"))
+    assert codes(tmp_path) == ["ADVERTISED_SKILL_MISSING"]
+    make_repo_dir = tmp_path / "skills" / "beta"
+    write(make_repo_dir / "SKILL.md", GOOD_SKILL.format(name="beta"))
+    assert sorted(codes(tmp_path)) == ["ADVERTISED_SKILL_MISSING", "SKILL_NOT_ADVERTISED"]
+
+
+def test_readme_index_markers_required(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "README.md", "# no markers\n")
+    assert codes(tmp_path) == ["README_INDEX_MISSING"]
+
+
+def test_bundled_script_and_reference_resolve(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    skill = tmp_path / "skills/alpha"
+    write(skill / "scripts/run.py", "print('ok')\n")
+    write(skill / "references/guide.md", "# guide\n")
+    write(
+        skill / "SKILL.md",
+        GOOD_SKILL.format(name="alpha")
+        + "\nRun `python scripts/run.py` and read [guide](references/guide.md).\n"
+        + "See references/guide.md and the scripts/ directory.\n",
+    )
+    assert codes(tmp_path) == []
+
+
+def test_broken_bundled_path(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        GOOD_SKILL.format(name="alpha") + "\nRun `python scripts/missing.py`.\n",
+    )
+    assert codes(tmp_path) == ["REFERENCE_BROKEN"]
+
+
+def test_broken_markdown_link(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        GOOD_SKILL.format(name="alpha") + "\nSee [more](other.md).\n",
+    )
+    assert codes(tmp_path) == ["REFERENCE_BROKEN"]
+
+
+def test_external_links_and_anchors_are_ignored(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        GOOD_SKILL.format(name="alpha")
+        + "\n[docs](https://example.com/scripts/x) [top](#top) https://example.com/scripts/x.py\n",
+    )
+    assert codes(tmp_path) == []
+
+
+def test_placeholders_are_not_paths(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        GOOD_SKILL.format(name="alpha")
+        + "\nWrite `references/<name>.md` and match scripts/*.py.\n",
+    )
+    assert codes(tmp_path) == []
+
+
+def test_bare_directory_reference_must_exist(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        GOOD_SKILL.format(name="alpha") + "\nHelpers live in the scripts/ directory.\n",
+    )
+    assert codes(tmp_path) == ["REFERENCE_BROKEN"]
+    (tmp_path / "skills/alpha/scripts").mkdir()
+    assert codes(tmp_path) == []
+
+
+def test_link_escaping_the_skill_is_rejected(tmp_path: Path) -> None:
+    make_repo(tmp_path, skills=("alpha", "beta"))
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        GOOD_SKILL.format(name="alpha") + "\nSee [b](../beta/SKILL.md).\n",
+    )
+    assert codes(tmp_path) == ["REFERENCE_ESCAPES_SKILL"]
+
+
+def test_bundled_path_escaping_the_skill_is_rejected(tmp_path: Path) -> None:
+    make_repo(tmp_path, skills=("alpha", "beta"))
+    write(tmp_path / "skills/beta/scripts/x.py", "x = 1\n")
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        GOOD_SKILL.format(name="alpha") + "\nRun `../scripts/x.py`.\n",
+    )
+    assert codes(tmp_path) == ["REFERENCE_ESCAPES_SKILL"]
+
+
+def test_python_syntax_error(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/scripts/bad.py", "def broken(:\n")
+    assert codes(tmp_path) == ["PYTHON_SYNTAX"]
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("Ask Matt for help", "FORBIDDEN_UPSTREAM_REFERENCE"),
+        ("see mattpocock/skills", "FORBIDDEN_UPSTREAM_REFERENCE"),
+        ("Runs under Gemini", "FORBIDDEN_HARNESS_REFERENCE"),
+        ("the Antigravity harness", "FORBIDDEN_HARNESS_REFERENCE"),
+        ("clone agy-skills", "FORBIDDEN_HARNESS_REFERENCE"),
+        ("cd /home/tticom-automation/work", "FORBIDDEN_ABSOLUTE_PATH"),
+        ("open C:\\Users\\someone\\x", "FORBIDDEN_ABSOLUTE_PATH"),
+        ("under skills/engineering/foo", "FORBIDDEN_LEGACY_LAYOUT"),
+        ("under plugins/productivity", "FORBIDDEN_LEGACY_LAYOUT"),
+    ],
+)
+def test_forbidden_strings(tmp_path: Path, text: str, code: str) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/SKILL.md", GOOD_SKILL.format(name="alpha") + f"\n{text}\n")
+    assert code in codes(tmp_path)
+
+
+def test_ordinary_words_are_not_flagged(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        GOOD_SKILL.format(name="alpha") + "\nThis matters: formatting, matter, and $HOME\\.claude\\skills.\n",
+    )
+    assert codes(tmp_path) == []
+
+
+def test_provenance_files_may_name_the_lineage(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/NOTICE.md", "Derived in part from Matt Pocock's skills (MIT).\n")
+    assert codes(tmp_path) == []
+
+
+def test_symlink_is_rejected(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    target = tmp_path / "skills/alpha/real.md"
+    write(target, "x")
+    link = tmp_path / "skills/alpha/link.md"
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this platform or account")
+    assert codes(tmp_path) == ["SYMLINK_FORBIDDEN"]

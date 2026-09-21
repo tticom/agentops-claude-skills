@@ -101,18 +101,24 @@ def scoped_repos(workspace: Path) -> tuple[list[Path], list[Path]]:
     return inside, outside
 
 
-def unique_scan_repos(repos: list[Path]) -> list[Path]:
-    """Scan each underlying repository once even when several checkouts share it."""
-    unique: list[Path] = []
-    seen: set[str] = set()
+def group_repos(repos: list[Path]) -> list[list[Path]]:
+    """Group checkouts by the repository they belong to (their git common directory).
+
+    Each repository is scanned once. Which checkout issues the git commands, and which
+    worktrees are eligible for cleanup, are separate questions: no checkout is exempt
+    merely for being listed first.
+    """
+    groups: dict[str, list[Path]] = {}
     for repo in repos:
         common = run_cmd(["git", "rev-parse", "--git-common-dir"], cwd=repo, check=False).stdout.strip()
         key = os.path.normcase(os.path.realpath(repo / common)) if common else str(repo)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(repo)
-    return unique
+        groups.setdefault(key, []).append(repo)
+    return list(groups.values())
+
+
+def choose_anchor(anchors: list[Path], target: Path) -> Path | None:
+    """A checkout to run git from that is not the worktree being removed."""
+    return next((anchor for anchor in anchors if not same_path(anchor, target)), None)
 
 
 def default_base_branch(repo: Path) -> str:
@@ -212,11 +218,29 @@ def cleanup(
         print(f"Skipping {repo.name}: it resolves outside the requested workspace")
         note("preserved", repo, "repository resolves outside the requested workspace")
 
-    for repo in unique_scan_repos(repos):
-        print(f"Scanning {repo.name}...")
-        base = base_branch or default_base_branch(repo)
+    for group in group_repos(repos):
+        label = group[0].name
+        print(f"Scanning {label}...")
+        try:
+            worktrees = get_worktrees(group[0])
+        except RuntimeError as error:
+            print(f"Cannot list worktrees for {label}: {error}")
+            note("error", group[0], f"cannot list worktrees: {error}")
+            continue
+        # Git lists the primary worktree first. It is preserved, never removed.
+        primary = Path(worktrees[0]["path"]) if worktrees else group[0]
+        # Checkouts git can be run from, primary first. Which one issues commands never
+        # decides what is cleaned: any worktree other than the primary is judged on its
+        # own merits, wherever it sorts.
+        anchors: list[Path] = []
+        for candidate in [primary, *(Path(wt["path"]) for wt in worktrees[1:]), *group]:
+            if candidate.is_dir() and not any(same_path(candidate, kept) for kept in anchors):
+                anchors.append(candidate)
+        if not anchors:
+            note("error", group[0], "no existing checkout to run git from")
+            continue
+        base = base_branch or default_base_branch(anchors[0])
 
-        worktrees = get_worktrees(repo)
         prunable = [wt for wt in worktrees if "prunable" in wt]
         stray = [wt["path"] for wt in prunable if not within_workspace(wt["path"], workspace)]
         if stray:
@@ -224,24 +248,25 @@ def cleanup(
             # means it must not run at all.
             note(
                 "preserved",
-                repo,
+                anchors[0],
                 "metadata not pruned: git worktree prune is repository-wide and these prunable "
                 "worktrees are outside the requested workspace: " + ", ".join(stray),
             )
         elif prunable:
             prune_cmd = ["git", "worktree", "prune"] + (["--dry-run"] if dry_run else [])
-            pruned = run_cmd(prune_cmd, cwd=repo, check=False)
+            pruned = run_cmd(prune_cmd, cwd=anchors[0], check=False)
             if pruned.returncode != 0:
-                note("error", repo, f"git worktree prune failed: {pruned.stderr.strip()}")
+                note("error", anchors[0], f"git worktree prune failed: {pruned.stderr.strip()}")
             else:
                 for wt in prunable:
                     note("dry_run_prune" if dry_run else "pruned_metadata", wt["path"], wt["prunable"])
                 if not dry_run:
-                    worktrees = get_worktrees(repo)
+                    worktrees = get_worktrees(anchors[0])
 
         for wt in worktrees:
             wt_path = Path(wt["path"])
-            if same_path(wt_path, repo):
+            if same_path(wt_path, primary):
+                note("preserved", wt_path, "primary checkout (never removed)")
                 continue
             if not within_workspace(wt_path, workspace):
                 print(f"Preserving worktree outside the workspace: {wt_path}")
@@ -268,7 +293,11 @@ def cleanup(
                 print(f"Preserving dirty worktree: {wt_path}")
                 note("preserved", wt_path, "dirty worktree")
                 continue
-            if not is_stale_review(repo, wt.get("branch"), base, use_gh):
+            anchor = choose_anchor(anchors, wt_path)
+            if anchor is None:
+                note("preserved", wt_path, "no other checkout of this repository to run git from")
+                continue
+            if not is_stale_review(anchor, wt.get("branch"), base, use_gh):
                 print(f"Preserving active or unverified review worktree: {wt_path}")
                 note("preserved", wt_path, "active/unverified review")
                 continue
@@ -277,7 +306,7 @@ def cleanup(
                 note("dry_run_remove", wt_path, "clean stale review worktree")
                 continue
             try:
-                run_cmd(["git", "worktree", "remove", str(wt_path)], cwd=repo)
+                run_cmd(["git", "worktree", "remove", str(wt_path)], cwd=anchor)
                 note("removed_worktree", wt_path, "clean stale review worktree")
             except Exception as error:
                 print(f"Failed to remove {wt_path}: {error}")

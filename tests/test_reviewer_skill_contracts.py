@@ -87,6 +87,8 @@ def test_publication_is_read_back_and_leaves_the_reviewed_repository_clean() -> 
     basic = read(BASIC)
     assert "Read the published state back" in basic
     assert "A write response is never treated as proof" in basic
+    assert "complete inline-comment collection" in basic
+    assert "where a missing value never matches" in basic
     assert "searches every page of the issue comments" in basic
     assert "git status --porcelain=v1 --untracked-files=all" in basic
     assert "no commit, push, ref update, merge" in basic
@@ -142,7 +144,9 @@ def test_changes_requested_contract_enforces_remediation_rules() -> None:
 def test_workspace_cleanup_contract_names_the_workspace_as_the_boundary() -> None:
     text = read("workspace-cleanup/SKILL.md")
     for phrase in ("The requested workspace is the boundary", "outside the requested workspace",
-                   "cannot be limited to a path", "symlinks and Windows junctions followed"):
+                   "cannot be limited to a path", "symlinks and Windows junctions followed",
+                   "never decides what is cleaned", "wherever it sorts alphabetically",
+                   "holds only linked worktrees"):
         assert phrase in text
 
 

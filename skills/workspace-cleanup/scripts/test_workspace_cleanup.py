@@ -9,6 +9,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,6 +29,19 @@ def commit(cwd, name):
     (Path(cwd) / name).write_text(name, encoding="utf-8")
     git(cwd, "add", name)
     git(cwd, "commit", "-q", "-m", name)
+
+
+def rmtree_force(path):
+    """Delete a Git repository even where read-only object files block shutil.rmtree (Windows)."""
+    import shutil
+    import stat
+    for root, dirs, files in os.walk(path):
+        for name in files + dirs:
+            try:
+                os.chmod(os.path.join(root, name), stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+            except OSError:
+                pass
+    shutil.rmtree(path)
 
 
 class Workspace:
@@ -408,6 +422,125 @@ class WorkspaceContainmentTest(unittest.TestCase):
         self.assertFalse(stale_in.exists())
         self.assertTrue(stale_out.exists())
         self.assertTrue((dirty_out / "scratch.txt").exists())
+
+
+class AnchorIndependenceTest(unittest.TestCase):
+    """Which checkout issues the git commands must never decide which worktrees are cleaned."""
+
+    def test_alphabetical_order_does_not_decide_whether_a_review_worktree_is_cleaned(self):
+        """Reviewer reproduction: the same qualifying worktree, differing only in its name."""
+        results = {}
+        for name in ("internal-review-pr-8", "zz-internal-review-pr-8"):
+            with self.subTest(name=name):
+                ws = Workspace(self)  # primary checkout is workspace/project
+                worktree = ws.review(8, name=name)
+                ws.run()
+                results[name] = (worktree.exists(), ("removed_worktree", "clean stale review worktree") in ws.actions(worktree))
+        self.assertEqual(results["internal-review-pr-8"], results["zz-internal-review-pr-8"])
+        self.assertEqual(results["internal-review-pr-8"], (False, True))
+
+    def test_the_dry_run_agrees_for_both_orderings(self):
+        for name in ("internal-review-pr-8", "zz-internal-review-pr-8"):
+            with self.subTest(name=name):
+                ws = Workspace(self)
+                worktree = ws.review(8, name=name)
+                ws.run("--dry-run")
+                self.assertIn(("dry_run_remove", "clean stale review worktree"), ws.actions(worktree))
+                self.assertTrue(worktree.exists())
+
+    def test_every_non_primary_worktree_gets_a_decision_wherever_it_sorts(self):
+        ws = Workspace(self)
+        stale = [ws.review(1, name="a-review-pr-1"), ws.review(2, name="m-review-pr-2"),
+                 ws.review(3, name="zz-review-pr-3")]
+        dirty = ws.review(4, name="b-review-pr-4", dirty=True)
+        active = ws.review(5, name="c-review-pr-5", merged=False)
+        listed = [Path(line.split(" ", 1)[1]).resolve() for line in
+                  git(ws.repo, "worktree", "list", "--porcelain").splitlines() if line.startswith("worktree ")]
+        ws.run()
+        self.assertTrue(all(not path.exists() for path in stale))
+        self.assertTrue(dirty.exists() and active.exists())
+        decided = {Path(e["path"]).resolve() for e in ws.receipt()}
+        missing = [str(path) for path in listed if path not in decided]
+        self.assertEqual(missing, [], "a worktree was silently skipped")
+
+    def test_the_primary_checkout_is_preserved_and_recorded_not_silently_skipped(self):
+        ws = Workspace(self)
+        ws.run()
+        self.assertTrue(any(a == "preserved" and "primary checkout" in r for a, r in ws.actions(ws.repo)))
+        self.assertTrue(ws.repo.exists())
+
+    def test_a_primary_whose_name_matches_the_review_pattern_is_never_removed(self):
+        ws = Workspace(self)
+        renamed = ws.root / "project-review"
+        ws.repo.rename(renamed)  # a primary that matches -review$
+        ws.repo = renamed
+        worktree = ws.review(9, name="project-review-pr-9")
+        ws.run()
+        self.assertTrue(renamed.exists() and (renamed / ".git").exists())
+        self.assertFalse(worktree.exists())
+        self.assertNotIn("removed_worktree", [a for a, _ in ws.actions(renamed)])
+
+    def test_a_workspace_holding_only_linked_worktrees_is_cleaned_explicitly(self):
+        """The primary checkout lives outside the workspace; every checkout inside is linked."""
+        ws = Workspace(self)
+        primary = ws.root.parent / "primary-elsewhere"
+        ws.repo.rename(primary)
+        ws.repo = primary
+        first = ws.review(1, name="w1-review-pr-1")
+        second = ws.review(2, name="w2-review-pr-2")
+        keep = ws.review(3, name="w3-review-pr-3", merged=False)
+        code, _ = ws.run()
+        self.assertEqual(code, 0)
+        self.assertFalse(first.exists() or second.exists())
+        self.assertTrue(keep.exists())
+        self.assertTrue(primary.exists() and (primary / "base.txt").exists(), "the primary was touched")
+        self.assertEqual(git(primary, "branch", "--list", "review/3").strip() != "", True)
+
+    def test_a_missing_primary_checkout_is_an_explicit_error_not_a_crash_or_a_removal(self):
+        ws = Workspace(self)
+        primary = ws.root.parent / "vanished-primary"
+        ws.repo.rename(primary)
+        ws.repo = primary
+        worktree = ws.review(1, name="w1-review-pr-1")
+        rmtree_force(primary)
+        code, _ = ws.run()
+        self.assertEqual(code, 0)
+        self.assertTrue(worktree.exists())
+        self.assertTrue(any(a == "error" for a, _ in ws.actions()), ws.actions())
+
+    def test_several_repositories_are_each_cleaned_whatever_their_sort_order(self):
+        ws = Workspace(self)  # workspace/project
+        other = ws.root / "zeta"
+        other.mkdir()
+        git(other, "init", "-q")
+        git(other, "checkout", "-q", "-b", "main")
+        commit(other, "z.txt")
+        early = ws.root / "a-review-pr-1"          # sorts before its own primary (project)
+        git(ws.repo, "worktree", "add", "-q", "-b", "review/a", str(early))
+        late = ws.root / "zz-review-pr-2"          # sorts after both primaries
+        git(other, "worktree", "add", "-q", "-b", "review/z", str(late))
+        _, out = ws.run()
+        self.assertFalse(early.exists() or late.exists(), out)
+        self.assertTrue(ws.repo.exists() and other.exists())
+
+    def test_a_worktree_is_never_removed_by_git_running_inside_it(self):
+        """Removing a directory that is the command's own working directory fails on Windows."""
+        ws = Workspace(self)
+        target = ws.review(1, name="a-review-pr-1")
+        calls = []
+        real = wc.run_cmd
+
+        def spy(cmd, cwd=None, check=True):
+            if list(cmd)[:3] == ["git", "worktree", "remove"]:
+                calls.append((str(cmd[-1]), str(cwd)))
+            return real(cmd, cwd=cwd, check=check)
+
+        with unittest.mock.patch.object(wc, "run_cmd", spy):
+            ws.run()
+        self.assertEqual(len(calls), 1)
+        removed, cwd = calls[0]
+        self.assertFalse(wc.same_path(removed, cwd), "git ran from inside the worktree it removed")
+        self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

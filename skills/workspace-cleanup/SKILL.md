@@ -39,6 +39,15 @@ entry is inside the workspace; if any is outside, pruning is skipped for that
 repository and the receipt says so. (Git older than 2.31 does not report prunable
 entries, so on such a version metadata is not pruned.)
 
+**Which checkout runs git never decides what is cleaned.** Git lists the primary
+checkout first; it is preserved and recorded ("primary checkout"), never removed.
+Every other worktree of the repository is judged on its own merits, wherever it sorts
+alphabetically, and git commands are issued from a checkout other than the one being
+removed (the primary when it exists, otherwise another linked checkout). A workspace
+that holds only linked worktrees is cleaned the same way. If the repository cannot be
+read at all (for example its primary was deleted), that is reported as an error and
+nothing is removed.
+
 ## Run it
 
 Always preview first:

@@ -523,5 +523,108 @@ class SubprocessEncodingTest(unittest.TestCase):
         self.assertTrue(captured["text"])
 
 
+class InlineReadBackCompletenessTest(unittest.TestCase):
+    """The persisted inline collection is always checked, exactly, with real location data."""
+
+    COMMENT = {"path": "a.py", "line": 3, "side": "RIGHT", "body": "finding"}
+
+    def publish(self, tamper=None, inline=None):
+        gh = FakeGh()
+        if tamper is not None:
+            gh.tamper["review_comments"] = tamper
+        return gh, Run(self, gh=gh, inline=[self.COMMENT] if inline is None else inline)
+
+    def test_missing_line_and_original_line_is_not_a_wildcard(self):
+        """Reviewer reproduction: a persisted object with only path and body."""
+        for label, tamper in (
+            ("no location at all", lambda items: [{"path": i["path"], "body": i["body"]} for i in items]),
+            ("no line", lambda items: [{k: v for k, v in i.items() if k not in ("line", "original_line")} for i in items]),
+            ("null line and original_line", lambda items: [{**i, "line": None, "original_line": None} for i in items]),
+            ("no side", lambda items: [{k: v for k, v in i.items() if k != "side"} for i in items]),
+            ("null side", lambda items: [{**i, "side": None} for i in items]),
+            ("no commit", lambda items: [{k: v for k, v in i.items() if k != "commit_id"} for i in items]),
+        ):
+            with self.subTest(label=label):
+                gh, run = self.publish(tamper)
+                with self.assertRaisesRegex(SystemExit, "REVIEW_PUBLICATION=FAIL.*inline"):
+                    run.go()
+
+    def test_wrong_location_data_still_fails(self):
+        for label, tamper in (
+            ("wrong line", lambda items: [{**i, "line": 4} for i in items]),
+            ("wrong original_line", lambda items: [{**i, "line": None, "original_line": 4} for i in items]),
+            ("wrong side", lambda items: [{**i, "side": "LEFT"} for i in items]),
+            ("wrong commit", lambda items: [{**i, "commit_id": OTHER} for i in items]),
+            ("wrong path", lambda items: [{**i, "path": "b.py"} for i in items]),
+            ("line is not a number", lambda items: [{**i, "line": "3"} for i in items]),
+        ):
+            with self.subTest(label=label):
+                gh, run = self.publish(tamper)
+                with self.assertRaisesRegex(SystemExit, "REVIEW_PUBLICATION=FAIL.*inline"):
+                    run.go()
+
+    def test_exact_location_is_accepted_including_the_original_line_fallback(self):
+        for label, tamper in (
+            ("as returned", None),
+            ("extra fields", lambda items: [{**i, "id": 9, "start_line": None, "diff_hunk": "@@"} for i in items]),
+            ("outdated comment: line null, original_line set",
+             lambda items: [{**i, "line": None, "original_line": 3} for i in items]),
+        ):
+            with self.subTest(label=label):
+                gh, run = self.publish(tamper)
+                self.assertIn("REVIEW_PUBLICATION=PASS", run.go().output)
+
+    def test_the_collection_is_fetched_even_when_no_inline_comments_were_expected(self):
+        gh, run = self.publish(inline=[])
+        run.go()
+        review_id = next(iter(gh.reviews))
+        self.assertTrue(gh.reads(f"/reviews/{review_id}/comments"), "the inline endpoint was never queried")
+
+    def test_an_unexpected_persisted_comment_fails_when_none_were_submitted(self):
+        """Reviewer reproduction: zero expected, one remote."""
+        extra = {"path": "z.py", "line": 1, "side": "RIGHT", "body": "surprise", "commit_id": HEAD}
+        gh, run = self.publish(lambda items: items + [extra], inline=[])
+        with self.assertRaisesRegex(SystemExit, "REVIEW_PUBLICATION=FAIL.*inline"):
+            run.go()
+
+    def test_zero_expected_and_zero_persisted_passes(self):
+        gh, run = self.publish(inline=[])
+        self.assertIn("REVIEW_PUBLICATION=PASS", run.go().output)
+
+    def test_cardinality_must_match_exactly_in_both_directions(self):
+        two = [self.COMMENT, {"path": "b.py", "line": 9, "side": "LEFT", "body": "second"}]
+        for label, tamper, inline in (
+            ("one missing", lambda items: items[:1], two),
+            ("one extra", lambda items: items + [{**items[0], "body": "extra"}], [self.COMMENT]),
+            ("duplicate of one, other missing", lambda items: [items[0], items[0]], two),
+        ):
+            with self.subTest(label=label):
+                gh, run = self.publish(tamper, inline)
+                with self.assertRaisesRegex(SystemExit, "REVIEW_PUBLICATION=FAIL.*inline"):
+                    run.go()
+
+    def test_an_unretrievable_inline_collection_fails_even_with_none_expected(self):
+        gh, run = self.publish(inline=[])
+        original = gh.__call__
+
+        def failing(*args, stdin=None):
+            if "--method" not in args and "/comments?" in args[-1] and "/reviews/" in args[-1]:
+                raise subprocess.CalledProcessError(1, list(args), stderr="HTTP 502")
+            return original(*args, stdin=stdin)
+
+        with patch.object(publish_review, "run_json", side_effect=failing), patch.object(sys, "argv", run.argv), \
+                patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != "AGENTOPS_ROLE_POLICY"}), \
+                patch("sys.stdout", new_callable=io.StringIO):
+            with self.assertRaisesRegex(SystemExit, "REVIEW_PUBLICATION=FAIL.*cannot re-read"):
+                main()
+
+    def test_paginated_inline_collections_are_read_completely(self):
+        many = [{"path": f"f{n}.py", "line": n + 1, "side": "RIGHT", "body": f"finding {n}"} for n in range(105)]
+        gh, run = self.publish(inline=many)
+        self.assertIn("REVIEW_PUBLICATION=PASS", run.go().output)
+        pages = [c[0][-1] for c in gh.calls if "--method" not in c[0] and "/reviews/" in c[0][-1] and "comments?" in c[0][-1]]
+        self.assertTrue(any("page=2" in p for p in pages))
+
+
 if __name__ == "__main__":
     unittest.main()

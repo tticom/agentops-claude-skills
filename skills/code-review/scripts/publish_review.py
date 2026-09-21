@@ -94,13 +94,22 @@ def publish_summary(repo: str, pr: int, *, actor: str, marker: str, summary: str
     return comment_id
 
 
-def _inline_matches(expected: dict[str, Any], remote: dict[str, Any]) -> bool:
+def _location_matches(expected: dict[str, Any], remote: dict[str, Any], expected_head: str) -> bool:
+    """True only when the persisted comment *proves* the requested location.
+
+    Unknown is not equal: a missing or null line, side or commit never matches. GitHub
+    reports ``line`` for a comment on the current diff and ``original_line`` for one
+    that has since become outdated; either may supply the line, but one must.
+    """
     line = remote.get("line") if remote.get("line") is not None else remote.get("original_line")
     return (
         remote.get("path") == expected["path"]
         and gh_publication.same_text(remote.get("body"), expected["body"])
-        and (line is None or line == expected["line"])
-        and (remote.get("side") is None or remote.get("side") == expected["side"])
+        and isinstance(line, int)
+        and not isinstance(line, bool)
+        and line == expected["line"]
+        and remote.get("side") == expected["side"]
+        and remote.get("commit_id") == expected_head
     )
 
 
@@ -127,23 +136,26 @@ def verify_persisted_review(
         )
     if not gh_publication.same_text(remote.get("body"), body):
         raise gh_publication.PublicationError("persisted review body differs from the published body")
-    if not inline_comments:
-        return
+
+    # Always read the persisted inline collection, even when none was published: an
+    # unexpected comment is exactly what a zero-item check would otherwise never see.
     persisted = gh_publication.paginate(
         run_json, f"repos/{repo}/pulls/{pr}/reviews/{review_id}/comments", "inline review comments"
     )
+    if len(persisted) != len(inline_comments):
+        raise gh_publication.PublicationError(
+            f"the review persisted {len(persisted)} inline comment(s) but "
+            f"{len(inline_comments)} were published"
+        )
     unmatched = list(persisted)
     for expected in inline_comments:
-        hit = next((item for item in unmatched if _inline_matches(expected, item)), None)
+        hit = next((item for item in unmatched if _location_matches(expected, item, expected_head)), None)
         if hit is None:
             raise gh_publication.PublicationError(
-                f"inline comment on {expected['path']}:{expected['line']} did not persist faithfully"
+                f"inline comment on {expected['path']}:{expected['line']} did not persist "
+                "faithfully (its location, side, commit or body differ or are missing)"
             )
         unmatched.remove(hit)
-    if unmatched:
-        raise gh_publication.PublicationError(
-            f"the review persisted {len(unmatched)} inline comment(s) that were not published"
-        )
 
 
 def verify_persisted_summary(

@@ -294,3 +294,105 @@ def test_symlink_is_rejected(tmp_path: Path) -> None:
     except (OSError, NotImplementedError):
         pytest.skip("symlinks unavailable on this platform or account")
     assert codes(tmp_path) == ["SYMLINK_FORBIDDEN"]
+
+
+# --- fail-closed decoding (review of f462886, blocker 1) -------------------
+
+
+def write_bytes(path: Path, data: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def test_non_utf8_skill_md_is_an_error_not_a_skip(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(
+        tmp_path / "skills/alpha/SKILL.md",
+        b"---\nname: WRONG\ndescription: caf\xe9 Matt\n---\n[x](nope.md)\n",
+    )
+    assert codes(tmp_path) == ["NON_UTF8_FILE"]
+
+
+def test_utf16_script_hiding_forbidden_text_is_rejected(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(
+        tmp_path / "skills/alpha/scripts/x.py",
+        "# Gemini /home/someone\n".encode("utf-16"),
+    )
+    assert codes(tmp_path) == ["NON_UTF8_FILE"]
+
+
+def test_non_utf8_file_with_unknown_suffix_is_rejected(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / "skills/alpha/references/blob.bin", b"\xff\xfe\x00\x01")
+    write_bytes(tmp_path / "skills/alpha/references/noext", b"\x80abc")
+    assert codes(tmp_path) == ["NON_UTF8_FILE", "NON_UTF8_FILE"]
+
+
+def test_image_under_assets_may_be_binary(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / "skills/alpha/assets/logo.png", b"\x89PNG\r\n\x1a\n\x00\x00")
+    assert codes(tmp_path) == []
+
+
+def test_image_outside_assets_is_rejected(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / "skills/alpha/references/logo.png", b"\x89PNG\r\n\x1a\n")
+    write_bytes(tmp_path / "skills/alpha/logo.png", b"\x89PNG\r\n\x1a\n")
+    assert codes(tmp_path) == ["NON_UTF8_FILE", "NON_UTF8_FILE"]
+
+
+def test_non_image_binary_under_assets_is_rejected(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / "skills/alpha/assets/tool.exe", b"MZ\x90\x00\xff")
+    assert codes(tmp_path) == ["NON_UTF8_FILE"]
+
+
+def test_forbidden_ascii_inside_binary_asset_is_reported(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(
+        tmp_path / "skills/alpha/assets/logo.png",
+        b"\x89PNG\r\n\x1a\n\xff\x00tEXt Comment: made for Gemini\x00",
+    )
+    assert codes(tmp_path) == ["FORBIDDEN_HARNESS_REFERENCE"]
+
+
+def test_non_utf8_readme_is_an_issue_not_a_crash(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / "README.md", b"\xff\xfe# readme")
+    assert codes(tmp_path) == ["README_UNREADABLE"]
+
+
+def test_unreadable_file_is_an_error_not_a_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_repo(tmp_path)
+    target = write(tmp_path / "skills/alpha/references/a.md", "x")
+    original = Path.read_bytes
+
+    def flaky(self: Path) -> bytes:
+        if self == target:
+            raise PermissionError("denied")
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky)
+    assert codes(tmp_path) == ["READ_FAILED"]
+
+
+def test_provenance_exemption_only_applies_in_skill_root(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/NOTICE.md", "Derived from Matt Pocock's skills.\n")
+    assert codes(tmp_path) == []
+    write(tmp_path / "skills/alpha/scripts/NOTICE.md", "Derived from Matt Pocock's skills.\n")
+    write(tmp_path / "skills/alpha/references/LICENSE", "Gemini\n")
+    assert codes(tmp_path) == [
+        "FORBIDDEN_HARNESS_REFERENCE",
+        "FORBIDDEN_UPSTREAM_REFERENCE",
+    ]
+
+
+def test_provenance_file_must_still_be_utf8(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / "skills/alpha/NOTICE.md", "Matt\n".encode("utf-16"))
+    assert codes(tmp_path) == ["NON_UTF8_FILE"]

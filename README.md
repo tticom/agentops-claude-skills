@@ -40,10 +40,13 @@ when a skill:
   unquoted `: `);
 - links to, or names, a bundled `scripts/`, `references/` or `assets/` path
   that does not exist, or reaches outside its own directory;
-- contains a symlink or a Python script that does not parse;
+- contains a file that is not valid UTF-8 (undecodable files are errors, never
+  skipped; only image files under `assets/` may be binary), a symlink, or a
+  Python script that does not parse;
 - mentions the retired upstream lineage, retired harnesses, machine-specific
   absolute paths or the legacy bucketed layout. Provenance files
-  (`NOTICE.md`, `PROVENANCE.md`, `LICENSE*`) are exempt.
+  (`NOTICE.md`, `PROVENANCE.md`, `LICENSE*`) are exempt only when they sit
+  directly in the skill's root directory.
 
 Do not write consumer-side file names with a `scripts/`, `references/` or
 `assets/` prefix in a skill body unless the file is bundled in the skill.

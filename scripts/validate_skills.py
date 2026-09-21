@@ -8,10 +8,12 @@ Checks, for every directory under ``skills/``:
 * markdown links and bundled ``scripts/``, ``references/`` and ``assets/``
   paths resolve, and never escape the skill directory (each skill must be
   installable on its own);
+* every file is valid UTF-8 (fail closed: an undecodable file is an error, never
+  skipped), except image files under ``assets/``, which are scanned as bytes;
 * Python scripts parse, and no symlinks are present;
 * no legacy-lineage, harness-specific or machine-specific strings appear,
-  except in explicit provenance files (``NOTICE.md``, ``PROVENANCE.md``,
-  ``LICENSE*``).
+  except in provenance files (``NOTICE.md``, ``PROVENANCE.md``, ``LICENSE*``)
+  located directly in the skill's root directory.
 
 The README skill index (between the ``skills:start`` and ``skills:end``
 markers) must list exactly the skill directories that exist.
@@ -41,6 +43,7 @@ PROVENANCE_FILES = frozenset(
     {"NOTICE.md", "PROVENANCE.md", "LICENSE", "LICENSE.md", "LICENSE.txt"}
 )
 ALLOWED_TOP_LEVEL_FILES = frozenset({".gitkeep"})
+BINARY_ASSET_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico"})
 
 FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
@@ -197,11 +200,19 @@ def _walk(skill_dir: Path) -> tuple[list[Path], list[Path]]:
     return sorted(files), sorted(links)
 
 
-def _read_text(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8-sig")
-    except UnicodeDecodeError:
-        return None
+def _is_binary_asset(skill_dir: Path, path: Path) -> bool:
+    """Only image files directly under ``assets/`` may be non-UTF-8."""
+    parts = path.relative_to(skill_dir).parts
+    return (
+        len(parts) >= 2
+        and parts[0] == "assets"
+        and path.suffix.lower() in BINARY_ASSET_SUFFIXES
+    )
+
+
+def _is_provenance_file(skill_dir: Path, path: Path) -> bool:
+    """Provenance files are exempt only when they sit in the skill root."""
+    return path.parent == skill_dir and path.name in PROVENANCE_FILES
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -308,7 +319,15 @@ def _check_references(
                 )
 
 
-def _check_forbidden(rel: str, text: str, issues: list[Issue]) -> None:
+def _check_forbidden(
+    rel: str, text: str, issues: list[Issue], *, binary: bool = False
+) -> None:
+    if binary:
+        for code, pattern, message in FORBIDDEN_PATTERNS:
+            found = pattern.search(text)
+            if found:
+                issues.append(Issue(rel, None, code, f"{message}: {found.group(0)!r} (in binary)"))
+        return
     for lineno, line in enumerate(text.splitlines(), start=1):
         for code, pattern, message in FORBIDDEN_PATTERNS:
             found = pattern.search(line)
@@ -334,12 +353,32 @@ def validate_skill(root: Path, skill_dir: Path, issues: list[Issue]) -> None:
         )
     for path in files:
         rel = path.relative_to(root).as_posix()
-        text = _read_text(path)
-        if text is None:
+        try:
+            data = path.read_bytes()
+        except OSError as error:
+            issues.append(Issue(rel, None, "READ_FAILED", str(error)))
+            continue
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError as error:
+            if _is_binary_asset(skill_dir, path):
+                # Best effort: catch embedded ASCII strings in image metadata.
+                if not _is_provenance_file(skill_dir, path):
+                    _check_forbidden(rel, data.decode("latin-1"), issues, binary=True)
+            else:
+                issues.append(
+                    Issue(
+                        rel,
+                        None,
+                        "NON_UTF8_FILE",
+                        f"not valid UTF-8 ({error.reason} at byte {error.start}); "
+                        "only image files under assets/ may be binary",
+                    )
+                )
             continue
         if path == skill_md:
             _check_frontmatter(skill_dir, rel, text, issues)
-        if path.name not in PROVENANCE_FILES:
+        if not _is_provenance_file(skill_dir, path):
             _check_forbidden(rel, text, issues)
         if path.suffix.lower() == ".md":
             _check_references(skill_dir, path, rel, text, issues)
@@ -355,7 +394,11 @@ def _advertised_skills(root: Path, issues: list[Issue]) -> set[str] | None:
     if not readme.is_file():
         issues.append(Issue("README.md", None, "README_MISSING", "README.md not found"))
         return None
-    text = readme.read_text(encoding="utf-8-sig")
+    try:
+        text = readme.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as error:
+        issues.append(Issue("README.md", None, "README_UNREADABLE", f"cannot read as UTF-8: {error}"))
+        return None
     start, end = text.find(README_START), text.find(README_END)
     if start < 0 or end < start:
         issues.append(

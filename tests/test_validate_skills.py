@@ -520,3 +520,88 @@ def test_quote_led_continuation_line_is_not_exempt_from_plain_scalar_check(
         '---\nname: alpha\ndescription: first line\n  "second: line\n---\n',
     )
     assert codes(tmp_path) == ["FRONTMATTER_SYNTAX"]
+
+
+# --- review of b18cb47: dot-slash and repo-prefixed bundled paths (F1) -------
+
+
+def skill_with_body(tmp_path: Path, body: str) -> None:
+    write(tmp_path / "skills/alpha/SKILL.md", GOOD_SKILL.format(name="alpha") + f"\n{body}\n")
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "./scripts/nope.py",  # reviewer reproduction
+        "./references/nope.md",
+        "././scripts/nope.py",
+        "./assets/nope.png",
+    ],
+)
+def test_dot_slash_reference_to_missing_target_is_broken(tmp_path: Path, reference: str) -> None:
+    make_repo(tmp_path)
+    skill_with_body(tmp_path, f"Run `{reference}`.")
+    assert codes(tmp_path) == ["REFERENCE_BROKEN"]
+
+
+def test_dot_slash_reference_to_existing_internal_target_is_accepted(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/scripts/run.py", "print('ok')\n")
+    write(tmp_path / "skills/alpha/references/guide.md", "# guide\n")
+    skill_with_body(tmp_path, "Run `./scripts/run.py`; read ./references/guide.md and [g](./references/guide.md).")
+    assert codes(tmp_path) == []
+
+
+def test_dot_slash_reference_that_leaves_the_skill_escapes(tmp_path: Path) -> None:
+    make_repo(tmp_path, skills=("alpha", "scripts"))
+    write(tmp_path / "skills/scripts/tool.py", "x = 1\n")
+    skill_with_body(tmp_path, "Run `./../scripts/tool.py`.")
+    assert codes(tmp_path) == ["REFERENCE_ESCAPES_SKILL"]
+
+
+def test_dot_slash_reference_keeps_placeholder_and_glob_guards(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    skill_with_body(tmp_path, "Write `./references/<name>.md` and match ./scripts/*.py and ./assets/{a,b}.")
+    assert codes(tmp_path) == []
+
+
+def test_dot_slash_reference_keeps_external_url_guard(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    skill_with_body(tmp_path, "See https://example.com/./scripts/x.py and [d](https://example.com/./references/y.md).")
+    assert codes(tmp_path) == []
+
+
+def test_dot_slash_prefix_does_not_hide_a_reference_in_a_document(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/references/guide.md", "# guide\n\nRun ./scripts/nope.py\n")
+    assert codes(tmp_path) == ["REFERENCE_BROKEN"]
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "skills/alpha/scripts/nope.py",  # reviewer reproduction
+        "./skills/alpha/references/nope.md",
+        "skills/alpha/assets/",
+    ],
+)
+def test_repo_prefixed_reference_is_rejected_as_not_portable(tmp_path: Path, reference: str) -> None:
+    make_repo(tmp_path)
+    skill_with_body(tmp_path, f"Run `{reference}`.")
+    assert codes(tmp_path) == ["REFERENCE_NOT_PORTABLE"]
+
+
+def test_repo_prefixed_reference_is_rejected_even_when_the_target_exists(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/scripts/run.py", "print('ok')\n")
+    skill_with_body(tmp_path, "Run `skills/alpha/scripts/run.py`.")
+    assert codes(tmp_path) == ["REFERENCE_NOT_PORTABLE"]
+
+
+def test_repo_prefixed_reference_keeps_placeholder_and_prose_guards(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    skill_with_body(
+        tmp_path,
+        "Layout is skills/<name>/scripts/ and the skills/ directory holds skills/alpha itself.",
+    )
+    assert codes(tmp_path) == []

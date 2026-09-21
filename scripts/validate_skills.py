@@ -6,8 +6,10 @@ Checks, for every directory under ``skills/``:
 * ``SKILL.md`` exists and starts with strict frontmatter (``name`` matches the
   directory, ``description`` present, no unquoted ``: `` in plain scalars);
 * markdown links and bundled ``scripts/``, ``references/`` and ``assets/``
-  paths resolve, and never escape the skill directory (each skill must be
-  installable on its own);
+  paths (including ``./`` and ``../`` forms, normalised before checking)
+  resolve, and never escape the skill directory (each skill must be
+  installable on its own); repository-prefixed paths such as
+  ``skills/<name>/scripts/x`` are rejected as not portable;
 * every file is valid UTF-8 (fail closed: an undecodable file is an error, never
   skipped), except image, PDF and font files under ``assets/``, which are
   scanned as bytes for forbidden ASCII strings;
@@ -82,9 +84,19 @@ FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+# A bundled path may be written with any run of ``./`` and ``../`` prefixes; they
+# are normalised (via resolution) before the containment and existence checks.
+_PATH_TAIL = r"(?:[A-Za-z0-9_.\-/]*[A-Za-z0-9_\-/])?"
 BUNDLED_PATH_RE = re.compile(
     r"(?<![\w./~$\\-])"
-    r"((?:\.\./)*(?:scripts|references|assets)/(?:[A-Za-z0-9_.\-/]*[A-Za-z0-9_\-/])?)"
+    rf"((?:\.{{1,2}}/)*(?:scripts|references|assets)/{_PATH_TAIL})"
+)
+# ``skills/<name>/scripts/...`` only resolves inside this repository's checkout,
+# so it breaks once the skill is installed on its own. Such references are
+# rejected as non-portable rather than validated.
+REPO_PREFIXED_PATH_RE = re.compile(
+    r"(?<![\w./~$\\-])"
+    rf"((?:\.{{1,2}}/)*skills/[A-Za-z0-9][A-Za-z0-9-]*/(?:scripts|references|assets)/{_PATH_TAIL})"
 )
 PLACEHOLDER_FOLLOWERS = "*<{$["
 FRONTMATTER_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:[ \t]+(.*))?$")
@@ -365,6 +377,19 @@ def _check_references(
                 issues.append(
                     Issue(rel, lineno, "REFERENCE_BROKEN", f"link {target!r} does not resolve")
                 )
+        for match in REPO_PREFIXED_PATH_RE.finditer(line):
+            follower = line[match.end() : match.end() + 1]
+            if follower and follower in PLACEHOLDER_FOLLOWERS:
+                continue
+            issues.append(
+                Issue(
+                    rel,
+                    lineno,
+                    "REFERENCE_NOT_PORTABLE",
+                    f"repository-prefixed path {match.group(1)!r} breaks when the skill "
+                    "is installed alone; use a skill-relative path such as 'scripts/...'",
+                )
+            )
         for match in BUNDLED_PATH_RE.finditer(line):
             reference = match.group(1)
             follower = line[match.end() : match.end() + 1]

@@ -39,7 +39,10 @@ when a skill:
   directory name; `description` is required; plain scalars must not contain an
   unquoted `: `);
 - links to, or names, a bundled `scripts/`, `references/` or `assets/` path
-  that does not exist, or reaches outside its own directory;
+  that does not exist, or reaches outside its own directory (`./` and `../`
+  prefixes are normalised first), or names a repository-prefixed path such as
+  `skills/<name>/scripts/x`, which only resolves in this checkout and breaks
+  when the skill is installed alone;
 - contains a file that is not valid UTF-8 (undecodable files are errors, never
   skipped; only image, PDF and font files under `assets/` may be binary), a symlink, or a
   Python script that does not parse;

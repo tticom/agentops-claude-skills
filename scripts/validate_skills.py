@@ -28,6 +28,7 @@ import argparse
 import ast
 import os
 import re
+import string
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,16 +102,71 @@ class Issue:
         return f"{where}: {self.code}: {self.message}"
 
 
+_DOUBLE_QUOTE_ESCAPES = {
+    "0": "\0", "a": "\a", "b": "\b", "t": "\t", "\t": "\t", "n": "\n", "v": "\v",
+    "f": "\f", "r": "\r", "e": "\x1b", " ": " ", '"': '"', "/": "/", "\\": "\\",
+    "N": "\x85", "_": "\xa0", "L": " ", "P": " ",
+}
+_HEX_ESCAPE_WIDTHS = {"x": 2, "u": 4, "U": 8}
+
+
+def _parse_double_quoted(value: str) -> tuple[str | None, str | None]:
+    """Decode a one-line double-quoted YAML scalar: (text, None) or (None, problem)."""
+    out: list[str] = []
+    index, length = 1, len(value)
+    while index < length:
+        char = value[index]
+        if char == '"':
+            if index != length - 1:
+                return None, 'unescaped " inside a double-quoted string (write it as \\")'
+            return "".join(out), None
+        if char == "\\":
+            index += 1
+            if index >= length:
+                break
+            escape = value[index]
+            if escape in _DOUBLE_QUOTE_ESCAPES:
+                out.append(_DOUBLE_QUOTE_ESCAPES[escape])
+                index += 1
+                continue
+            width = _HEX_ESCAPE_WIDTHS.get(escape)
+            if width is None:
+                return None, f"invalid escape '\\{escape}' in a double-quoted string"
+            digits = value[index + 1 : index + 1 + width]
+            if len(digits) != width or any(c not in string.hexdigits for c in digits):
+                return None, f"'\\{escape}' needs exactly {width} hex digits"
+            try:
+                out.append(chr(int(digits, 16)))
+            except (ValueError, OverflowError):
+                return None, f"'\\{escape}{digits}' is not a valid code point"
+            index += 1 + width
+            continue
+        out.append(char)
+        index += 1
+    return None, "unterminated double-quoted string"
+
+
+def _parse_single_quoted(value: str) -> tuple[str | None, str | None]:
+    """Decode a one-line single-quoted YAML scalar: (text, None) or (None, problem)."""
+    out: list[str] = []
+    index, length = 1, len(value)
+    while index < length:
+        char = value[index]
+        if char == "'":
+            if index + 1 < length and value[index + 1] == "'":
+                out.append("'")
+                index += 2
+                continue
+            if index != length - 1:
+                return None, "unescaped ' inside a single-quoted string (write it as '')"
+            return "".join(out), None
+        out.append(char)
+        index += 1
+    return None, "unterminated single-quoted string"
+
+
 def _plain_scalar_problem(key: str, value: str) -> str | None:
     if not value:
-        return None
-    if value[0] == '"':
-        if len(value) < 2 or not value.endswith('"') or value.endswith('\\"'):
-            return "unterminated double-quoted string"
-        return None
-    if value[0] == "'":
-        if len(value) < 2 or not value.endswith("'"):
-            return "unterminated single-quoted string"
         return None
     if ": " in value or value.endswith(":"):
         return "unquoted ': ' in a plain scalar (invalid YAML; quote the value)"
@@ -121,12 +177,15 @@ def _plain_scalar_problem(key: str, value: str) -> str | None:
     return None
 
 
-def _unquote(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] == '"':
-        return value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-    if len(value) >= 2 and value[0] == value[-1] == "'":
-        return value[1:-1].replace("''", "'")
-    return value
+def _decode_scalar(key: str, value: str) -> tuple[str, str | None]:
+    """Return (decoded value, problem). On a problem the raw value is kept."""
+    if value[:1] == '"':
+        decoded, problem = _parse_double_quoted(value)
+    elif value[:1] == "'":
+        decoded, problem = _parse_single_quoted(value)
+    else:
+        return value, _plain_scalar_problem(key, value)
+    return (value if decoded is None else decoded), problem
 
 
 def parse_frontmatter(
@@ -150,9 +209,14 @@ def parse_frontmatter(
                 )
             else:
                 continuation = raw.strip()
-                problem = _plain_scalar_problem(last_plain_key, continuation)
-                if problem and not continuation.startswith(("'", '"')):
-                    problems.append((lineno, "FRONTMATTER_SYNTAX", problem))
+                if ": " in continuation or continuation.endswith(":"):
+                    problems.append(
+                        (
+                            lineno,
+                            "FRONTMATTER_SYNTAX",
+                            "unquoted ': ' in a plain scalar (invalid YAML; quote the value)",
+                        )
+                    )
                 fields[last_plain_key] = f"{fields[last_plain_key]} {continuation}".strip()
             index += 1
             continue
@@ -180,10 +244,10 @@ def parse_frontmatter(
             last_plain_key = None
             index = cursor
             continue
-        problem = _plain_scalar_problem(key, value)
+        decoded, problem = _decode_scalar(key, value)
         if problem:
             problems.append((lineno, "FRONTMATTER_SYNTAX", problem))
-        fields[key] = _unquote(value)
+        fields[key] = decoded
         index += 1
     return fields, problems
 
@@ -307,22 +371,27 @@ def _check_references(
             if follower and follower in PLACEHOLDER_FOLLOWERS:
                 continue
             candidates = (skill_dir / reference, path.parent / reference)
-            if not any(_is_within(c, skill_dir) for c in candidates):
-                issues.append(
-                    Issue(
-                        rel,
-                        lineno,
-                        "REFERENCE_ESCAPES_SKILL",
-                        f"path {reference!r} leaves the skill",
-                    )
-                )
-            elif not any(c.exists() for c in candidates):
+            contained = [c for c in candidates if _is_within(c, skill_dir)]
+            # One candidate must be both inside the skill and present: an
+            # existing file elsewhere must not satisfy the reference.
+            if any(c.exists() for c in contained):
+                continue
+            if contained:
                 issues.append(
                     Issue(
                         rel,
                         lineno,
                         "REFERENCE_BROKEN",
                         f"bundled path {reference!r} does not resolve inside the skill",
+                    )
+                )
+            else:
+                issues.append(
+                    Issue(
+                        rel,
+                        lineno,
+                        "REFERENCE_ESCAPES_SKILL",
+                        f"path {reference!r} leaves the skill",
                     )
                 )
 

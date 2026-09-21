@@ -418,3 +418,105 @@ def test_provenance_file_must_still_be_utf8(tmp_path: Path) -> None:
     make_repo(tmp_path)
     write_bytes(tmp_path / "skills/alpha/NOTICE.md", "Matt\n".encode("utf-16"))
     assert codes(tmp_path) == ["NON_UTF8_FILE"]
+
+
+# --- review of 4d4c71b: containment/existence on one candidate (P1) ---------
+
+
+def test_bundled_path_must_exist_on_a_contained_candidate(tmp_path: Path) -> None:
+    """Reviewer reproduction: an external file must not satisfy the reference."""
+    make_repo(tmp_path, skills=("alpha", "scripts"))
+    write(tmp_path / "skills/scripts/tool.py", "x = 1\n")  # outside alpha
+    write(
+        tmp_path / "skills/alpha/references/guide.md",
+        "# guide\n\nRun `../scripts/tool.py`.\n",
+    )
+    # skill-root candidate exists but is outside alpha; document-relative
+    # candidate is inside alpha but missing.
+    assert codes(tmp_path) == ["REFERENCE_BROKEN"]
+
+
+def test_document_relative_bundled_path_inside_the_skill_is_accepted(tmp_path: Path) -> None:
+    make_repo(tmp_path, skills=("alpha", "scripts"))
+    write(tmp_path / "skills/scripts/tool.py", "x = 1\n")
+    write(tmp_path / "skills/alpha/scripts/tool.py", "x = 1\n")
+    write(
+        tmp_path / "skills/alpha/references/guide.md",
+        "# guide\n\nRun `../scripts/tool.py`.\n",
+    )
+    assert codes(tmp_path) == []
+
+
+def test_bundled_path_outside_the_skill_with_no_internal_candidate_escapes(
+    tmp_path: Path,
+) -> None:
+    make_repo(tmp_path, skills=("alpha", "scripts"))
+    write(tmp_path / "skills/scripts/tool.py", "x = 1\n")
+    write(tmp_path / "skills/alpha/SKILL.md", GOOD_SKILL.format(name="alpha") + "\nRun `../scripts/tool.py`.\n")
+    assert codes(tmp_path) == ["REFERENCE_ESCAPES_SKILL"]
+
+
+# --- review of 4d4c71b: validate quoted frontmatter scalars (P2) ------------
+
+
+def frontmatter(description: str, name: str = "alpha") -> str:
+    return f"---\nname: {name}\ndescription: {description}\n---\n"
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        r'"Use \q here"',  # invalid escape (reviewer reproduction)
+        r'"Use "quoted" text"',  # unescaped embedded quote (reviewer reproduction)
+        r'"Use \u12 here"',  # short unicode escape
+        r'"Use \xZZ here"',  # non-hex escape
+        r'"Use \U0011FFFF here"',  # code point out of range
+        '"unterminated',
+        '"closed" trailing',
+        "'it's'",  # unescaped embedded single quote
+        "'unterminated",
+        "'closed' trailing",
+    ],
+)
+def test_invalid_quoted_frontmatter_is_rejected(tmp_path: Path, description: str) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/SKILL.md", frontmatter(description))
+    assert codes(tmp_path) == ["FRONTMATTER_SYNTAX"]
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        r'"Use \"quoted\" text"',
+        r'"tab\there and \\ backslash"',
+        r'"caf\u00e9 \x41 \U0001F600"',
+        '"colon: inside"',
+        "'it''s fine'",
+        "'colon: inside'",
+        '""',
+        "''",
+    ],
+)
+def test_valid_quoted_frontmatter_is_accepted(tmp_path: Path, description: str) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/SKILL.md", frontmatter(description))
+    assert "FRONTMATTER_SYNTAX" not in codes(tmp_path)
+
+
+def test_quoted_name_is_decoded_before_comparison(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write(tmp_path / "skills/alpha/SKILL.md", frontmatter("ok", name='"alpha"'))
+    assert codes(tmp_path) == []
+    write(tmp_path / "skills/alpha/SKILL.md", frontmatter("ok", name="'alpha'"))
+    assert codes(tmp_path) == []
+
+
+def test_quote_led_continuation_line_is_not_exempt_from_plain_scalar_check(
+    tmp_path: Path,
+) -> None:
+    make_repo(tmp_path)
+    write(
+        tmp_path / "skills/alpha/SKILL.md",
+        '---\nname: alpha\ndescription: first line\n  "second: line\n---\n',
+    )
+    assert codes(tmp_path) == ["FRONTMATTER_SYNTAX"]

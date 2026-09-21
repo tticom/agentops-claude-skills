@@ -27,6 +27,30 @@ Attribution is never removed from material that is still materially derived
 from third-party work. A skill that keeps such material carries its own
 `NOTICE.md` (exempt from the validator's lineage check).
 
+## Migration record
+
+The first bulk migration took its skills from `tticom/agy-skills` `main` at
+`8366e98413974f18f8ddf4e7e20b35d2e39f45a4`. Every source command, its disposition,
+and its class are listed in [docs/MIGRATION_INVENTORY.md](docs/MIGRATION_INVENTORY.md).
+
+Derived material and how its attribution is kept:
+
+| Skill | Derived from | Record |
+|---|---|---|
+| `code-review` | the two-axis Standards and Spec review structure of upstream `code-review` | `skills/code-review/NOTICE.md` |
+| `verified-implementation` | the opening passage of upstream `implement`, which the skill extends | `skills/verified-implementation/NOTICE.md` |
+
+Each `NOTICE.md` names the upstream project, states what is derived, and reproduces
+the upstream MIT license and copyright notice verbatim. It sits in the skill's root
+directory, so it is installed with the skill and is exempt from the validator's
+lineage check.
+
+The other migrated skills were first authored by the local identities according to
+the git history at the pinned revision, so they carry no upstream notice. That is a
+statement about history, not a legal determination. Skills that upstream provides
+unchanged were recorded in the inventory as `upstream-provided` and were not
+copied. No upstream plugin, marketplace, or setup skill is part of this repository.
+
 ## License
 
 This repository's original work is released under the MIT License (see

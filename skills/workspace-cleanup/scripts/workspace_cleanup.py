@@ -47,6 +47,21 @@ def same_path(a: Path | str, b: Path | str) -> bool:
     return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
 
 
+def within_workspace(path: Path | str, workspace: Path | str) -> bool:
+    """True only if ``path`` *resolves* to the workspace or somewhere below it.
+
+    Symlinks and Windows junctions are resolved first, so a link inside the workspace
+    that points elsewhere is outside; comparison is by path components, so a sibling
+    such as ``<workspace>-other`` is outside; and it is case-insensitive on Windows.
+    """
+    real = os.path.normcase(os.path.realpath(path))
+    root = os.path.normcase(os.path.realpath(workspace))
+    try:
+        return os.path.commonpath([real, root]) == root
+    except ValueError:  # different drives on Windows
+        return False
+
+
 def is_dirty(path: Path | str) -> bool:
     return bool(run_cmd(["git", "status", "--porcelain"], cwd=path).stdout.strip())
 
@@ -75,6 +90,15 @@ def get_worktrees(repo_path: Path) -> list[dict[str, Any]]:
 
 def discover_repos(workspace: Path) -> list[Path]:
     return sorted(d for d in workspace.iterdir() if d.is_dir() and (d / ".git").exists())
+
+
+def scoped_repos(workspace: Path) -> tuple[list[Path], list[Path]]:
+    """Split the workspace's checkouts into (inside, resolves-outside)."""
+    inside: list[Path] = []
+    outside: list[Path] = []
+    for repo in discover_repos(workspace):
+        (inside if within_workspace(repo, workspace) else outside).append(repo)
+    return inside, outside
 
 
 def unique_scan_repos(repos: list[Path]) -> list[Path]:
@@ -176,25 +200,52 @@ def cleanup(
     task_pointer: str | None,
 ) -> Path:
     pattern = re.compile(review_pattern)
-    repos = discover_repos(workspace)
+    repos, linked_outside = scoped_repos(workspace)
     receipt: list[dict[str, str]] = []
 
     def note(action: str, path: Path | str, reason: str) -> None:
         receipt.append({"action": action, "path": str(path), "reason": reason})
 
+    # Git's worktree list is repository-wide, so the requested workspace, not git, is the
+    # boundary: nothing that resolves outside it is ever selected, removed or pruned.
+    for repo in linked_outside:
+        print(f"Skipping {repo.name}: it resolves outside the requested workspace")
+        note("preserved", repo, "repository resolves outside the requested workspace")
+
     for repo in unique_scan_repos(repos):
         print(f"Scanning {repo.name}...")
         base = base_branch or default_base_branch(repo)
 
-        prune_cmd = ["git", "worktree", "prune"] + (["--dry-run"] if dry_run else [])
-        pruned = run_cmd(prune_cmd, cwd=repo, check=False)
-        output = "\n".join(part for part in (pruned.stdout, pruned.stderr) if part.strip())
-        if pruned.returncode == 0 and output.strip():
-            note("dry_run_prune" if dry_run else "pruned_metadata", repo, output.strip())
+        worktrees = get_worktrees(repo)
+        prunable = [wt for wt in worktrees if "prunable" in wt]
+        stray = [wt["path"] for wt in prunable if not within_workspace(wt["path"], workspace)]
+        if stray:
+            # `git worktree prune` cannot be limited to a path, so one out-of-scope entry
+            # means it must not run at all.
+            note(
+                "preserved",
+                repo,
+                "metadata not pruned: git worktree prune is repository-wide and these prunable "
+                "worktrees are outside the requested workspace: " + ", ".join(stray),
+            )
+        elif prunable:
+            prune_cmd = ["git", "worktree", "prune"] + (["--dry-run"] if dry_run else [])
+            pruned = run_cmd(prune_cmd, cwd=repo, check=False)
+            if pruned.returncode != 0:
+                note("error", repo, f"git worktree prune failed: {pruned.stderr.strip()}")
+            else:
+                for wt in prunable:
+                    note("dry_run_prune" if dry_run else "pruned_metadata", wt["path"], wt["prunable"])
+                if not dry_run:
+                    worktrees = get_worktrees(repo)
 
-        for wt in get_worktrees(repo):
+        for wt in worktrees:
             wt_path = Path(wt["path"])
             if same_path(wt_path, repo):
+                continue
+            if not within_workspace(wt_path, workspace):
+                print(f"Preserving worktree outside the workspace: {wt_path}")
+                note("preserved", wt_path, "outside the requested workspace")
                 continue
             if not pattern.search(wt_path.name):
                 print(f"Skipping unclassified worktree: {wt_path}")
@@ -233,7 +284,7 @@ def cleanup(
                 note("error", wt_path, str(error))
 
     # Re-discover: worktrees removed above no longer exist and must not be indexed.
-    index = write_workspace_index(workspace, discover_repos(workspace), index_file, task_pointer)
+    index = write_workspace_index(workspace, scoped_repos(workspace)[0], index_file, task_pointer)
     note("workspace_index", index, "human-readable checkout map")
     stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
     receipt_file = receipt_dir / f"{stamp}-cleanup-receipt.json"

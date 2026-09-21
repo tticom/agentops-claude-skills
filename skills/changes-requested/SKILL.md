@@ -54,10 +54,17 @@ requires to be clean:
 python <skill-dir>/scripts/fetch_review_findings.py --repo <owner/repo> --pr <number> --output <external-dir>/review-remediation-ledger.md
 ```
 
-`scripts/fetch_review_findings.py` selects the latest non-dismissed formal review
-by server timestamp then review ID, reads unresolved review threads (GraphQL,
-falling back to REST comments), and flags a review or summary comment pinned to a
-head older than the live PR head as STALE. Add `--json` for machine-readable output.
+`scripts/fetch_review_findings.py` keeps verdicts and discussion apart. An
+independent reviewer's outstanding `CHANGES_REQUESTED` stays in the ledger, with its
+formal review body, until that same reviewer approves it or it is dismissed. A
+comment-only review, including the author's own replies, is listed under
+*Discussion* and never supersedes a blocking verdict; another reviewer's approval
+does not clear someone else's blocker; and the PR author's own reviews carry no
+verdict. Reviews are ordered by server timestamp then review ID. It reads unresolved
+review threads (GraphQL, falling back to REST comments), and flags a review or summary
+comment pinned to a head older than the live PR head as STALE. A blocker on an older
+head stays outstanding and is marked stale. Add `--json` for machine-readable output,
+which includes `blocking_reviews` and `discussion`.
 
 Verify:
 

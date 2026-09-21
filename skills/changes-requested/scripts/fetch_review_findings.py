@@ -118,18 +118,69 @@ def parse_summary_comment(comments: list[dict[str, Any]]) -> dict[str, Any] | No
     return None
 
 
-def select_latest_review(reviews: list[dict[str, Any]]) -> dict[str, Any]:
-    """Select the latest formal non-dismissed review ordered by timestamp and ID."""
-    valid_reviews = [
-        r for r in reviews
-        if r.get("state") not in {"DISMISSED", "PENDING"} and r.get("state")
+VERDICT_STATES = {"APPROVED", "CHANGES_REQUESTED"}
+DISCUSSION_STATE = "COMMENTED"
+
+
+def _login(review: dict[str, Any]) -> str:
+    return str((review.get("user") or {}).get("login", "")).lower()
+
+
+def _order(review: dict[str, Any]) -> tuple[str, int]:
+    """Server timestamp, then stable review id."""
+    return (str(review.get("submitted_at") or review.get("created_at") or ""), review.get("id") or 0)
+
+
+def verdict_reviews(reviews: list[dict[str, Any]], pr_author: str | None = None) -> list[dict[str, Any]]:
+    """Reviews that can carry a verdict.
+
+    Only a formal APPROVED or CHANGES_REQUESTED counts. A comment-only review is
+    discussion, a dismissed or pending review is not a verdict, and the pull request
+    author is not an independent reviewer, so their reviews never carry one.
+    """
+    author = (pr_author or "").lower()
+    return [
+        review for review in reviews
+        if review.get("state") in VERDICT_STATES and not (author and _login(review) == author)
     ]
-    if not valid_reviews:
-        return {}
-    # Sort by submitted_at (or created_at) and id
-    return max(
-        valid_reviews,
-        key=lambda r: (str(r.get("submitted_at") or r.get("created_at") or ""), r.get("id") or 0)
+
+
+def outstanding_blockers(reviews: list[dict[str, Any]], pr_author: str | None = None) -> list[dict[str, Any]]:
+    """Each independent reviewer's standing verdict, kept only where it is CHANGES_REQUESTED.
+
+    A reviewer's own later APPROVED clears their blocker; another reviewer's approval,
+    or anyone's comment, does not. Oldest first.
+    """
+    standing: dict[str, dict[str, Any]] = {}
+    for review in sorted(verdict_reviews(reviews, pr_author), key=_order):
+        standing[_login(review)] = review
+    return sorted(
+        (review for review in standing.values() if review.get("state") == "CHANGES_REQUESTED"),
+        key=_order,
+    )
+
+
+def select_latest_review(reviews: list[dict[str, Any]], pr_author: str | None = None) -> dict[str, Any]:
+    """The review that governs: the latest outstanding blocker, else the latest verdict.
+
+    Ordered by server timestamp then review ID. A later comment-only review never
+    supersedes a verdict.
+    """
+    blockers = outstanding_blockers(reviews, pr_author)
+    if blockers:
+        return blockers[-1]
+    verdicts = verdict_reviews(reviews, pr_author)
+    return max(verdicts, key=_order) if verdicts else {}
+
+
+def discussion_reviews(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Comment-only reviews that say something, oldest first. Context, never findings."""
+    return sorted(
+        (
+            review for review in reviews
+            if review.get("state") == DISCUSSION_STATE and str(review.get("body") or "").strip()
+        ),
+        key=_order,
     )
 
 
@@ -197,6 +248,22 @@ def extract_inline_findings(comments: list[dict[str, Any]]) -> list[dict[str, An
     return sorted(roots.values(), key=lambda f: str(f.get("path", "")) + str(f.get("line", "")))
 
 
+def _body_finding(index: int | str, review: dict[str, Any], location: str) -> dict[str, Any]:
+    return {
+        "index": index,
+        "source": "review_body",
+        "id": review.get("id"),
+        "location": location,
+        "author": (review.get("user") or {}).get("login"),
+        "finding": str(review.get("body") or "").strip(),
+        "defect_class": "review_summary",
+        "reviewed_head_test": "TODO: verify against review summary requirements",
+        "remediation_status": "OPEN",
+        "disposition": "",
+        "evidence": "",
+    }
+
+
 def build_remediation_ledger(
     pr_data: dict[str, Any],
     reviews: list[dict[str, Any]],
@@ -205,15 +272,29 @@ def build_remediation_ledger(
     *,
     is_thread_nodes: bool = False,
 ) -> dict[str, Any]:
-    """Assemble structured review findings and remediation ledger."""
+    """Assemble structured review findings and remediation ledger.
+
+    Verdicts and discussion are kept apart. An independent reviewer's outstanding
+    CHANGES_REQUESTED stays in the ledger, with its formal body, until that reviewer
+    supersedes it; comment-only reviews (including the author's replies) are recorded
+    as discussion and never displace a blocker.
+    """
+    pr_author = (pr_data.get("user") or {}).get("login")
     summary_data = parse_summary_comment(issue_comments)
-    latest_review = select_latest_review(reviews)
-    review_state = latest_review.get("state", "NO_REVIEW")
+    blockers = outstanding_blockers(reviews, pr_author)
+    latest_review = select_latest_review(reviews, pr_author)
+    discussion = discussion_reviews(reviews)
+    if latest_review:
+        review_state = latest_review["state"]
+    elif discussion:
+        review_state = "NO_VERDICT"
+    else:
+        review_state = "NO_REVIEW"
 
     pr_head = pr_data.get("head", {}).get("sha", "")
     review_commit = latest_review.get("commit_id")
 
-    # Binding reviewed head: prefer latest review's commit_id if present, else PR head
+    # Binding reviewed head: prefer the governing review's commit_id if present, else PR head
     reviewed_head = review_commit or pr_head
     review_is_stale = bool(review_commit and review_commit != pr_head)
 
@@ -252,22 +333,21 @@ def build_remediation_ledger(
             item["replies"] = finding["replies"]
         ledger_items.append(item)
 
-    # If there is a formal review body with text, add it as finding 0
-    review_body = latest_review.get("body", "").strip()
-    if review_body:
-        ledger_items.insert(0, {
-            "index": 0,
-            "source": "review_body",
-            "id": latest_review.get("id"),
-            "location": "PR Review Body",
-            "author": latest_review.get("user", {}).get("login"),
-            "finding": review_body,
-            "defect_class": "review_summary",
-            "reviewed_head_test": "TODO: verify against review summary requirements",
-            "remediation_status": "OPEN",
-            "disposition": "",
-            "evidence": "",
-        })
+    # Formal review bodies: the governing review first, then every other outstanding
+    # blocker. A blocker recorded only in a formal body must not vanish from the ledger.
+    body_sources = [latest_review] if latest_review else []
+    body_sources += [blocker for blocker in reversed(blockers) if blocker is not latest_review]
+    body_findings = []
+    for review in body_sources:
+        if not str(review.get("body") or "").strip():
+            continue
+        first = not body_findings
+        body_findings.append(_body_finding(
+            0 if first else f"0.{len(body_findings)}",
+            review,
+            "PR Review Body" if first else f"PR Review Body ({(review.get('user') or {}).get('login')})",
+        ))
+    ledger_items = body_findings + ledger_items
 
     return {
         "repository": pr_data.get("base", {}).get("repo", {}).get("full_name"),
@@ -277,7 +357,27 @@ def build_remediation_ledger(
         "reviewed_head": reviewed_head,
         "review_is_stale": review_is_stale,
         "review_state": review_state,
-        "reviewer": latest_review.get("user", {}).get("login"),
+        "reviewer": (latest_review.get("user") or {}).get("login"),
+        "blocking_reviews": [
+            {
+                "id": blocker.get("id"),
+                "reviewer": (blocker.get("user") or {}).get("login"),
+                "commit_id": blocker.get("commit_id"),
+                "submitted_at": blocker.get("submitted_at"),
+                "stale": bool(blocker.get("commit_id") and blocker.get("commit_id") != pr_head),
+            }
+            for blocker in blockers
+        ],
+        "discussion": [
+            {
+                "id": review.get("id"),
+                "author": (review.get("user") or {}).get("login"),
+                "submitted_at": review.get("submitted_at"),
+                "commit_id": review.get("commit_id"),
+                "body": str(review.get("body")).strip(),
+            }
+            for review in discussion
+        ],
         "summary": summary_data,
         "findings": ledger_items,
     }
@@ -293,6 +393,9 @@ def render_markdown_ledger(data: dict[str, Any]) -> str:
         f"- **Review State**: `{data.get('review_state')}`",
         f"- **Reviewer**: `{data.get('reviewer')}`",
     ]
+    for blocker in data.get("blocking_reviews") or []:
+        stale = " (STALE: older than the live head)" if blocker.get("stale") else ""
+        lines.append(f"- **Blocking review**: `{blocker.get('reviewer')}` review {blocker.get('id')}{stale}")
     if data.get("review_is_stale"):
         lines.append("- **WARNING**: Review is STALE (evaluated on older commit than current PR head).")
     if data.get("summary") and data["summary"].get("is_stale"):
@@ -301,9 +404,7 @@ def render_markdown_ledger(data: dict[str, Any]) -> str:
     lines.extend(["", "## Review Findings to Address", ""])
     if not data.get("findings"):
         lines.append("No unresolved review findings recorded.\n")
-        return "\n".join(lines)
-
-    for item in data["findings"]:
+    for item in data.get("findings") or []:
         lines.extend([
             f"### Finding {item['index']} ({item['location']})",
             f"- **Source**: `{item['source']}` (ID: {item['id']})",
@@ -321,6 +422,13 @@ def render_markdown_ledger(data: dict[str, Any]) -> str:
             "- **Exact-Head Evidence**: (fill in pass/fail command output)",
             "",
         ])
+
+    if data.get("discussion"):
+        lines.extend(["", "## Discussion (not verdicts)", "",
+                      "Comment-only reviews. They are context, not findings, and never supersede a blocking verdict.", ""])
+        for note in data["discussion"]:
+            lines.append(f"- `@{note.get('author')}` (review {note.get('id')}): {note.get('body')}")
+        lines.append("")
 
     return "\n".join(lines)
 

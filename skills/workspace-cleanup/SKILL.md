@@ -28,6 +28,17 @@ Absence of evidence is never evidence of staleness. It never deletes a branch,
 never touches a checkout's working files, never force-removes, and never operates
 on a filesystem root or a home directory.
 
+**The requested workspace is the boundary.** Git's worktree list is repository-wide,
+so a checkout in the workspace can have linked worktrees anywhere on disk. Every
+worktree and checkout is resolved (symlinks and Windows junctions followed, compared
+by path components, case-insensitive on Windows) and must lie inside the workspace
+before it is considered. Anything that resolves outside is preserved and recorded as
+"outside the requested workspace", on a dry run and a real run alike.
+`git worktree prune` cannot be limited to a path, so it runs only when every prunable
+entry is inside the workspace; if any is outside, pruning is skipped for that
+repository and the receipt says so. (Git older than 2.31 does not report prunable
+entries, so on such a version metadata is not pruned.)
+
 ## Run it
 
 Always preview first:

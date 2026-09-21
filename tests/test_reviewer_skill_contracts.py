@@ -134,7 +134,15 @@ def test_code_smells_have_operational_definitions_and_blocking_policy() -> None:
 def test_changes_requested_contract_enforces_remediation_rules() -> None:
     text = read("changes-requested/SKILL.md")
     for phrase in ("Never amend or force-push", "Reproduce before fixing", "publish-pr-handback",
-                   "fetch_review_findings.py", "do not push to its branch"):
+                   "fetch_review_findings.py", "do not push to its branch",
+                   "never supersedes a blocking verdict", "carry no verdict"):
+        assert phrase in text
+
+
+def test_workspace_cleanup_contract_names_the_workspace_as_the_boundary() -> None:
+    text = read("workspace-cleanup/SKILL.md")
+    for phrase in ("The requested workspace is the boundary", "outside the requested workspace",
+                   "cannot be limited to a path", "symlinks and Windows junctions followed"):
         assert phrase in text
 
 

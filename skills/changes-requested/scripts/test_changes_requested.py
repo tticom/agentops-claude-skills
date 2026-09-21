@@ -356,5 +356,156 @@ class TestRemoteFetchContract(unittest.TestCase):
             self.assertNotIn(banned, source)
 
 
+class TestVerdictSelection(unittest.TestCase):
+    """A comment is discussion, not a verdict. Only an independent reviewer's formal
+    APPROVED / CHANGES_REQUESTED can change what is outstanding."""
+
+    HEAD = "a" * 40
+    OLD = "b" * 40
+
+    def pr(self, head=None):
+        return {"number": 7, "head": {"sha": head or self.HEAD, "ref": "feature"},
+                "base": {"repo": {"full_name": "example-org/example"}}, "user": {"login": "Author"}}
+
+    def review(self, rid, state, login, when, body="", commit=None):
+        return {"id": rid, "state": state, "commit_id": commit or self.HEAD, "submitted_at": when,
+                "body": body, "user": {"login": login}}
+
+    def ledger(self, reviews, head=None):
+        return frf.build_remediation_ledger(self.pr(head), reviews, [], [])
+
+    def bodies(self, ledger):
+        return [f["finding"] for f in ledger["findings"]]
+
+    BLOCKER = "Blocking: the empty-list case is accepted. Fix and add a regression."
+
+    def test_an_author_comment_cannot_erase_a_body_only_blocker(self) -> None:
+        """Reviewer reproduction: blocker only in the formal body, then the author comments."""
+        ledger = self.ledger([
+            self.review(1, "CHANGES_REQUESTED", "reviewer", "2026-01-01T00:00:00Z", self.BLOCKER),
+            self.review(2, "COMMENTED", "author", "2026-01-02T00:00:00Z", "Thanks, investigating"),
+        ])
+        self.assertEqual(ledger["review_state"], "CHANGES_REQUESTED")
+        self.assertEqual(ledger["reviewer"], "reviewer")
+        self.assertEqual(self.bodies(ledger), [self.BLOCKER])
+        self.assertNotIn("Thanks, investigating", self.bodies(ledger))
+        self.assertEqual([b["reviewer"] for b in ledger["blocking_reviews"]], ["reviewer"])
+
+    def test_the_discussion_is_kept_but_separate_from_findings(self) -> None:
+        ledger = self.ledger([
+            self.review(1, "CHANGES_REQUESTED", "reviewer", "2026-01-01T00:00:00Z", self.BLOCKER),
+            self.review(2, "COMMENTED", "author", "2026-01-02T00:00:00Z", "Thanks, investigating"),
+        ])
+        self.assertEqual([d["body"] for d in ledger["discussion"]], ["Thanks, investigating"])
+        markdown = frf.render_markdown_ledger(ledger)
+        self.assertIn("Discussion", markdown)
+        self.assertIn(self.BLOCKER, markdown)
+        finding_section = markdown.split("## Discussion")[0]
+        self.assertNotIn("Thanks, investigating", finding_section)
+
+    def test_a_comment_only_review_by_anyone_never_supersedes_a_blocker(self) -> None:
+        for commenter in ("author", "reviewer", "another-reviewer"):
+            with self.subTest(commenter=commenter):
+                ledger = self.ledger([
+                    self.review(1, "CHANGES_REQUESTED", "reviewer", "2026-01-01T00:00:00Z", self.BLOCKER),
+                    self.review(2, "COMMENTED", commenter, "2026-01-02T00:00:00Z", "a note"),
+                ])
+                self.assertEqual(ledger["review_state"], "CHANGES_REQUESTED")
+                self.assertEqual(self.bodies(ledger), [self.BLOCKER])
+
+    def test_a_genuine_later_approval_by_the_same_reviewer_clears_the_blocker(self) -> None:
+        ledger = self.ledger([
+            self.review(1, "CHANGES_REQUESTED", "reviewer", "2026-01-01T00:00:00Z", self.BLOCKER),
+            self.review(2, "COMMENTED", "author", "2026-01-02T00:00:00Z", "fixed"),
+            self.review(3, "APPROVED", "Reviewer", "2026-01-03T00:00:00Z", "Looks good"),
+        ])
+        self.assertEqual(ledger["review_state"], "APPROVED")
+        self.assertEqual(ledger["blocking_reviews"], [])
+        self.assertNotIn(self.BLOCKER, self.bodies(ledger))
+
+    def test_a_later_changes_requested_supersedes_an_earlier_approval(self) -> None:
+        ledger = self.ledger([
+            self.review(1, "APPROVED", "reviewer", "2026-01-01T00:00:00Z", "ok"),
+            self.review(2, "CHANGES_REQUESTED", "reviewer", "2026-01-02T00:00:00Z", self.BLOCKER),
+        ])
+        self.assertEqual(ledger["review_state"], "CHANGES_REQUESTED")
+        self.assertEqual(self.bodies(ledger), [self.BLOCKER])
+
+    def test_another_reviewers_approval_does_not_clear_a_reviewers_blocker(self) -> None:
+        ledger = self.ledger([
+            self.review(1, "CHANGES_REQUESTED", "reviewer-a", "2026-01-01T00:00:00Z", self.BLOCKER),
+            self.review(2, "APPROVED", "reviewer-b", "2026-01-02T00:00:00Z", "fine by me"),
+        ])
+        self.assertEqual(ledger["review_state"], "CHANGES_REQUESTED")
+        self.assertEqual(ledger["reviewer"], "reviewer-a")
+        self.assertEqual(self.bodies(ledger), [self.BLOCKER])
+
+    def test_every_outstanding_blocker_is_preserved(self) -> None:
+        ledger = self.ledger([
+            self.review(1, "CHANGES_REQUESTED", "reviewer-a", "2026-01-01T00:00:00Z", "Blocker from A"),
+            self.review(2, "CHANGES_REQUESTED", "reviewer-b", "2026-01-02T00:00:00Z", "Blocker from B"),
+            self.review(3, "COMMENTED", "author", "2026-01-03T00:00:00Z", "on it"),
+        ])
+        self.assertEqual(sorted(self.bodies(ledger)), ["Blocker from A", "Blocker from B"])
+        self.assertEqual(sorted(b["reviewer"] for b in ledger["blocking_reviews"]), ["reviewer-a", "reviewer-b"])
+        self.assertEqual(ledger["reviewer"], "reviewer-b")  # the latest blocker governs the headline
+
+    def test_an_authors_own_review_never_carries_a_verdict(self) -> None:
+        ledger = self.ledger([
+            self.review(1, "CHANGES_REQUESTED", "reviewer", "2026-01-01T00:00:00Z", self.BLOCKER),
+            self.review(2, "APPROVED", "AUTHOR", "2026-01-02T00:00:00Z", "self approval"),
+        ])
+        self.assertEqual(ledger["review_state"], "CHANGES_REQUESTED")
+        self.assertEqual(self.bodies(ledger), [self.BLOCKER])
+
+    def test_a_blocker_on_an_older_head_stays_outstanding_and_is_flagged_stale(self) -> None:
+        ledger = self.ledger([
+            self.review(1, "CHANGES_REQUESTED", "reviewer", "2026-01-01T00:00:00Z", self.BLOCKER, commit=self.OLD),
+            self.review(2, "COMMENTED", "author", "2026-01-02T00:00:00Z", "pushed a fix"),
+        ])
+        self.assertEqual(ledger["review_state"], "CHANGES_REQUESTED")
+        self.assertTrue(ledger["review_is_stale"])
+        self.assertEqual(ledger["reviewed_head"], self.OLD)
+        self.assertEqual(self.bodies(ledger), [self.BLOCKER])
+        self.assertTrue(ledger["blocking_reviews"][0]["stale"])
+
+    def test_dismissed_and_pending_reviews_are_not_blockers(self) -> None:
+        ledger = self.ledger([
+            self.review(1, "DISMISSED", "reviewer", "2026-01-01T00:00:00Z", "was blocking"),
+            self.review(2, "PENDING", "reviewer", "2026-01-02T00:00:00Z", "draft"),
+        ])
+        self.assertEqual(ledger["blocking_reviews"], [])
+        self.assertEqual(ledger["review_state"], "NO_REVIEW")
+
+    def test_comment_only_history_has_no_verdict_and_no_findings_from_it(self) -> None:
+        ledger = self.ledger([
+            self.review(1, "COMMENTED", "reviewer", "2026-01-01T00:00:00Z", "a question"),
+            self.review(2, "COMMENTED", "author", "2026-01-02T00:00:00Z", "an answer"),
+        ])
+        self.assertEqual(ledger["review_state"], "NO_VERDICT")
+        self.assertEqual(ledger["blocking_reviews"], [])
+        self.assertEqual(self.bodies(ledger), [])
+        self.assertEqual(len(ledger["discussion"]), 2)
+
+    def test_empty_comment_bodies_are_not_discussion(self) -> None:
+        ledger = self.ledger([self.review(1, "COMMENTED", "reviewer", "2026-01-01T00:00:00Z", "  ")])
+        self.assertEqual(ledger["discussion"], [])
+
+    def test_select_latest_review_ignores_comment_only_records(self) -> None:
+        reviews = [
+            self.review(1, "CHANGES_REQUESTED", "reviewer", "2026-01-01T00:00:00Z"),
+            self.review(2, "COMMENTED", "reviewer", "2026-01-02T00:00:00Z"),
+        ]
+        self.assertEqual(frf.select_latest_review(reviews)["id"], 1)
+        self.assertEqual(frf.select_latest_review([self.review(3, "COMMENTED", "x", "2026-01-01T00:00:00Z")]), {})
+
+    def test_the_marker_summary_and_json_output_carry_the_new_fields(self) -> None:
+        ledger = self.ledger([
+            self.review(1, "CHANGES_REQUESTED", "reviewer", "2026-01-01T00:00:00Z", self.BLOCKER),
+        ])
+        self.assertEqual(set(ledger) >= {"blocking_reviews", "discussion", "review_state", "reviewer"}, True)
+        self.assertEqual(ledger["blocking_reviews"][0]["id"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

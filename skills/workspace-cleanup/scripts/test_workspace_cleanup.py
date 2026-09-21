@@ -5,6 +5,7 @@ import contextlib
 import getpass
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -252,6 +253,161 @@ class UnitTest(unittest.TestCase):
 
 def subprocess_result(stdout, code=0):
     return subprocess.CompletedProcess([], code, stdout=stdout, stderr="")
+
+
+class WorkspaceContainmentTest(unittest.TestCase):
+    """Git's worktree list is repository-wide; the requested workspace is the boundary."""
+
+    def setUp(self):
+        self.ws = Workspace(self)
+        self.outside_root = self.ws.root.parent  # a sibling of the workspace directory
+
+    def _outside(self, suffix, *, merged=True, missing=False):
+        path = self.outside_root / f"outside-review-pr-{suffix}"
+        git(self.ws.repo, "worktree", "add", "-q", "-b", f"outside/{suffix}", str(path))
+        if not merged:
+            commit(path, f"work-{suffix}.txt")
+        if missing:
+            import shutil
+            shutil.rmtree(path)
+        return path
+
+    def test_a_clean_merged_review_worktree_outside_the_workspace_is_never_removed(self):
+        """Reviewer reproduction: recorded as dry_run_remove, and removed without --dry-run."""
+        outside = self._outside(9)
+        inside = self.ws.review(1)
+        code, out = self.ws.run()
+        self.assertEqual(code, 0)
+        self.assertNotIn(f"Removing disposable worktree: {outside}", out)
+        self.assertTrue(outside.exists(), "an out-of-workspace worktree was deleted")
+        self.assertFalse(inside.exists(), "the in-workspace stale worktree should still be removed")
+        self.assertIn(("preserved", "outside the requested workspace"), self.ws.actions(outside))
+        self.assertNotIn("removed_worktree", [a for a, _ in self.ws.actions(outside)])
+
+    def test_a_dry_run_does_not_select_an_outside_worktree_either(self):
+        outside = self._outside(9)
+        self.ws.run("--dry-run")
+        actions = [a for a, _ in self.ws.actions(outside)]
+        self.assertNotIn("dry_run_remove", actions)
+        self.assertIn("preserved", actions)
+        self.assertTrue(outside.exists())
+
+    def test_the_internal_positive_control_still_removes(self):
+        inside = self.ws.review(2)
+        self._outside(3)
+        self.ws.run()
+        self.assertFalse(inside.exists())
+        self.assertIn(("removed_worktree", "clean stale review worktree"), self.ws.actions(inside))
+
+    def test_an_outside_worktree_is_preserved_even_when_it_would_otherwise_qualify_in_every_way(self):
+        outside = self._outside(4)
+        for extra in ((), ("--dry-run",), ("--base-branch", "main"), ("--review-worktree-pattern=.*",)):
+            with self.subTest(extra=extra):
+                self.ws.run(*extra)
+                self.assertTrue(outside.exists())
+
+    def test_a_sibling_directory_sharing_the_workspace_prefix_is_outside(self):
+        sibling = self.outside_root / (self.ws.root.name + "-evil")
+        sibling.mkdir()
+        path = sibling / "project-review-pr-5"
+        git(self.ws.repo, "worktree", "add", "-q", "-b", "outside/5", str(path))
+        self.ws.run()
+        self.assertTrue(path.exists())
+        self.assertIn(("preserved", "outside the requested workspace"), self.ws.actions(path))
+
+    def test_metadata_for_a_missing_outside_worktree_is_not_pruned(self):
+        """git worktree prune is repository-wide, so it must not run while an outside entry is prunable."""
+        outside = self._outside(6, missing=True)
+        self.assertIn("prunable", git(self.ws.repo, "worktree", "list", "--porcelain"))
+        code, _ = self.ws.run()
+        self.assertEqual(code, 0)
+        listing = git(self.ws.repo, "worktree", "list", "--porcelain")
+        self.assertIn(outside.name, listing, "outside worktree metadata was pruned")
+        self.assertTrue(any(a == "preserved" and "not pruned" in r for a, r in self.ws.actions()))
+        self.assertNotIn("pruned_metadata", [a for a, _ in self.ws.actions()])
+
+    def test_one_outside_prunable_entry_blocks_pruning_of_inside_ones_too(self):
+        outside = self._outside(7, missing=True)
+        inside = self.ws.review(8)
+        import shutil
+        shutil.rmtree(inside)
+        self.ws.run()
+        listing = git(self.ws.repo, "worktree", "list", "--porcelain")
+        self.assertIn(outside.name, listing)
+        self.assertIn(inside.name, listing, "prune cannot be scoped, so it must be skipped entirely")
+
+    def test_metadata_for_a_missing_inside_worktree_is_still_pruned(self):
+        inside = self.ws.review(10)
+        import shutil
+        shutil.rmtree(inside)
+        self.assertIn(inside.name, git(self.ws.repo, "worktree", "list", "--porcelain"))
+        self.ws.run()
+        self.assertNotIn(inside.name, git(self.ws.repo, "worktree", "list", "--porcelain"))
+        self.assertIn("pruned_metadata", [a for a, _ in self.ws.actions()])
+
+    def test_a_dry_run_reports_but_does_not_prune(self):
+        inside = self.ws.review(11)
+        import shutil
+        shutil.rmtree(inside)
+        self.ws.run("--dry-run")
+        self.assertIn(inside.name, git(self.ws.repo, "worktree", "list", "--porcelain"))
+        self.assertIn("dry_run_prune", [a for a, _ in self.ws.actions()])
+
+    def test_a_checkout_that_resolves_outside_the_workspace_is_not_scanned(self):
+        elsewhere = self.outside_root / "elsewhere-repo"
+        elsewhere.mkdir()
+        git(elsewhere, "init", "-q")
+        git(elsewhere, "checkout", "-q", "-b", "main")
+        commit(elsewhere, "x.txt")
+        stale = self.outside_root / "elsewhere-review-pr-1"
+        git(elsewhere, "worktree", "add", "-q", "-b", "r/1", str(stale))
+        link = self.ws.root / "linked-repo"
+        try:
+            if os.name == "nt":
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(elsewhere)],
+                               check=True, capture_output=True)
+            else:
+                os.symlink(elsewhere, link, target_is_directory=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("cannot create a link or junction on this platform or account")
+        out = self.ws.run()[1]
+        self.assertTrue(stale.exists(), "a repository outside the workspace was cleaned through a link")
+        self.assertIn("outside the requested workspace", json.dumps(self.ws.receipt()))
+        self.assertNotIn("Scanning linked-repo", out)
+
+    def test_a_link_inside_the_workspace_that_points_outside_is_not_within_it(self):
+        target = self.outside_root / "link-target"
+        target.mkdir()
+        link = self.ws.root / "a-link"
+        try:
+            if os.name == "nt":
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                               check=True, capture_output=True)
+            else:
+                os.symlink(target, link, target_is_directory=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("cannot create a link or junction on this platform or account")
+        self.assertFalse(wc.within_workspace(link, self.ws.root))
+        self.assertFalse(wc.within_workspace(link / "child", self.ws.root))
+
+    def test_within_workspace_boundaries(self):
+        root = self.ws.root
+        self.assertTrue(wc.within_workspace(root, root))
+        self.assertTrue(wc.within_workspace(root / "a" / "b", root))
+        self.assertTrue(wc.within_workspace(root / "a" / ".." / "b", root))
+        self.assertFalse(wc.within_workspace(root.parent, root))
+        self.assertFalse(wc.within_workspace(root.parent / (root.name + "-evil"), root))
+        self.assertFalse(wc.within_workspace(root / ".." / "elsewhere", root))
+
+    def test_the_documented_scope_is_the_only_thing_cleaned(self):
+        stale_in = self.ws.review(20)
+        stale_out = self._outside(21)
+        dirty_out = self._outside(22)
+        (dirty_out / "scratch.txt").write_text("uncommitted", encoding="utf-8")
+        self.ws.run()
+        self.assertFalse(stale_in.exists())
+        self.assertTrue(stale_out.exists())
+        self.assertTrue((dirty_out / "scratch.txt").exists())
 
 
 if __name__ == "__main__":

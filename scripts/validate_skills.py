@@ -47,6 +47,11 @@ PROVENANCE_FILES = frozenset(
     {"NOTICE.md", "PROVENANCE.md", "LICENSE", "LICENSE.md", "LICENSE.txt"}
 )
 ALLOWED_TOP_LEVEL_FILES = frozenset({".gitkeep"})
+# Interpreter bytecode is a build artifact, never distributed source. Only compiled
+# files directly inside a ``__pycache__`` directory are skipped; any other file
+# there, and any bytecode elsewhere, is still validated.
+BYTECODE_SUFFIXES = frozenset({".pyc", ".pyo"})
+BYTECODE_DIR = "__pycache__"
 # Non-inspected, non-executable asset formats. Anything else must decode as UTF-8.
 BINARY_ASSET_SUFFIXES = frozenset(
     {
@@ -454,6 +459,8 @@ def validate_skill(root: Path, skill_dir: Path, issues: list[Issue]) -> None:
             )
         )
     for path in files:
+        if path.suffix in BYTECODE_SUFFIXES and path.parent.name == BYTECODE_DIR:
+            continue
         rel = path.relative_to(root).as_posix()
         try:
             data = path.read_bytes()

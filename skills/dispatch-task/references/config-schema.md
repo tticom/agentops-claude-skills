@@ -49,6 +49,11 @@ Unknown keys are rejected so a misspelt field cannot silently disable a check.
   naming different files, are a `STOP_CONFLICT`: the resolver never chooses one.
 - `dispatch.command` is reported, never run, by the resolver. It is an argv list, so
   no shell is involved and nothing is interpolated.
+- Authority documents are read strictly. One that is not valid UTF-8, or cannot be
+  read, is `STOP_INVALID_AUTHORITY`; the resolver never substitutes replacement
+  characters, because a corrupted file could otherwise stop matching a
+  `no_task_markers` entry and dispatch anyway. A configuration file that is not
+  valid UTF-8 is `STOP_INVALID_CONFIG`.
 - The resolver reads files and writes nothing.
 
 ## What belongs in the project, not here

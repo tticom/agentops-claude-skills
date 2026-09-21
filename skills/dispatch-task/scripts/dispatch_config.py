@@ -15,6 +15,7 @@ Statuses
   STOP_CONFLICT           more than one, differing, configuration was supplied
   STOP_INVALID_CONFIG     configuration unreadable or malformed
   STOP_AUTHORITY_MISSING  a declared authority document does not exist
+  STOP_INVALID_AUTHORITY  a declared authority document cannot be read faithfully
   STOP_NO_ACTIVE_TASK     the task authority says no task is approved
 
 Exit status: 0 for READY and HANDOFF_ONLY, 3 for every STOP_* status.
@@ -41,6 +42,7 @@ STOP_STATUSES = {
     "STOP_CONFLICT",
     "STOP_INVALID_CONFIG",
     "STOP_AUTHORITY_MISSING",
+    "STOP_INVALID_AUTHORITY",
     "STOP_NO_ACTIVE_TASK",
 }
 
@@ -70,6 +72,17 @@ def _contained(base: Path, relative: str, field: str) -> Path:
     except ValueError as error:
         raise ConfigError("STOP_INVALID_CONFIG", f"{field} escapes the project directory") from error
     return resolved
+
+
+def _read_authority(path: Path, field: str) -> str:
+    """Read an authority document strictly; anything less than a faithful read is a stop."""
+    try:
+        return path.read_text(encoding="utf-8-sig")  # a byte-order mark is not corruption
+    except (OSError, UnicodeDecodeError) as error:
+        raise ConfigError(
+            "STOP_INVALID_AUTHORITY",
+            f"{field} {path} cannot be read faithfully: {error}",
+        ) from error
 
 
 def discover(project: Path, explicit: Path | None, env: dict[str, str]) -> Path:
@@ -110,7 +123,7 @@ def load(path: Path, project: Path) -> dict[str, Any]:
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ConfigError("STOP_INVALID_CONFIG", f"cannot read {path}: {error}") from error
     if not isinstance(data, dict):
         raise ConfigError("STOP_INVALID_CONFIG", "configuration root must be an object")
@@ -178,7 +191,11 @@ def load(path: Path, project: Path) -> dict[str, Any]:
     if missing:
         raise ConfigError("STOP_AUTHORITY_MISSING", "authority document(s) not found: " + ", ".join(missing))
 
-    text = active_path.read_text(encoding="utf-8", errors="replace")
+    # Authority is read strictly. Decoding with replacement characters would let a
+    # corrupted file quietly stop matching a no-task marker and dispatch anyway.
+    text = _read_authority(active_path, "authority.active_task")
+    for control in controls:
+        _read_authority(control, "authority.control_documents")
     no_active = any(marker in text for marker in markers)
 
     return {

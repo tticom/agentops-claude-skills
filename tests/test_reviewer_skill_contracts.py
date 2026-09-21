@@ -86,6 +86,8 @@ def test_exact_head_verification_and_clean_checkout_are_required() -> None:
 def test_publication_is_read_back_and_leaves_the_reviewed_repository_clean() -> None:
     basic = read(BASIC)
     assert "Read the published state back" in basic
+    assert "A write response is never treated as proof" in basic
+    assert "searches every page of the issue comments" in basic
     assert "git status --porcelain=v1 --untracked-files=all" in basic
     assert "no commit, push, ref update, merge" in basic
 
@@ -139,7 +141,8 @@ def test_changes_requested_contract_enforces_remediation_rules() -> None:
 def test_handback_contract_refuses_unproven_states() -> None:
     text = read("publish-pr-handback/SKILL.md")
     for phrase in ("AUTHOR_HANDBACK_PUBLICATION=PASS", "outside the worktree", "`NOT_RUN`",
-                   "Repeated execution on an unchanged head", "author-handback.v1"):
+                   "Repeated execution on an unchanged head", "author-handback.v1",
+                   "separate read of the persisted comment", "every page of the comment thread"):
         assert phrase in text
 
 
@@ -147,7 +150,7 @@ def test_dispatch_contract_never_invents_authority_or_state() -> None:
     text = read("dispatch-task/SKILL.md")
     for phrase in ("No action was executed; this is a handoff only.", "is not a task-state system",
                    "never permission", "without a shell", "STOP_NO_CONFIG", "STOP_CONFLICT",
-                   "STOP_NO_ACTIVE_TASK", "Do one bounded action, then stop"):
+                   "STOP_NO_ACTIVE_TASK", "STOP_INVALID_AUTHORITY", "Do one bounded action, then stop"):
         assert phrase in text
     assert "`go`" not in text.replace("no `go` alias", "")
 

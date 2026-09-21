@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import gh_publication
 import review_evidence_gate as evidence_gate
 import role_authority_gate as role_gate
 
@@ -65,6 +66,101 @@ def load_inline_comments(path: Path | None) -> list[dict[str, Any]]:
         if item["side"] not in {"LEFT", "RIGHT"}:
             raise ValueError(f"inline comment {index} has invalid side")
     return value
+
+
+def publish_summary(repo: str, pr: int, *, actor: str, marker: str, summary: str) -> int:
+    """Create or update the one marked summary comment; return its id.
+
+    The whole comment list is searched, page by page, so an existing summary is
+    updated wherever it sits and is never duplicated on a long thread.
+    """
+    comments = gh_publication.paginate(run_json, f"repos/{repo}/issues/{pr}/comments", "issue comments")
+    existing = next(iter(gh_publication.marked_comments(comments, actor=actor, marker=marker)), None)
+    if existing:
+        written = run_json(
+            "gh", "api", "--method", "PATCH",
+            f"repos/{repo}/issues/comments/{existing['id']}", "--input", "-",
+            stdin={"body": summary},
+        )
+    else:
+        written = run_json(
+            "gh", "api", "--method", "POST",
+            f"repos/{repo}/issues/{pr}/comments", "--input", "-",
+            stdin={"body": summary},
+        )
+    comment_id = written.get("id") if isinstance(written, dict) else None
+    if not isinstance(comment_id, int):
+        raise gh_publication.PublicationError("the summary write returned no comment id")
+    return comment_id
+
+
+def _inline_matches(expected: dict[str, Any], remote: dict[str, Any]) -> bool:
+    line = remote.get("line") if remote.get("line") is not None else remote.get("original_line")
+    return (
+        remote.get("path") == expected["path"]
+        and gh_publication.same_text(remote.get("body"), expected["body"])
+        and (line is None or line == expected["line"])
+        and (remote.get("side") is None or remote.get("side") == expected["side"])
+    )
+
+
+def verify_persisted_review(
+    repo: str, pr: int, *, review_id: int, expected_head: str, event: str, body: str,
+    inline_comments: list[dict[str, Any]],
+) -> None:
+    """Re-read the formal review and its inline comments and compare them to the intent."""
+    remote = gh_publication.fetch_object(
+        run_json, f"repos/{repo}/pulls/{pr}/reviews/{review_id}", "formal review"
+    )
+    if remote.get("id") != review_id:
+        raise gh_publication.PublicationError(
+            f"re-read review id {remote.get('id')!r} is not the created {review_id}"
+        )
+    if remote.get("commit_id") != expected_head:
+        raise gh_publication.PublicationError(
+            f"persisted review is on commit {remote.get('commit_id')!r}, not the expected head"
+        )
+    wanted_state = "APPROVED" if event == "APPROVE" else "CHANGES_REQUESTED"
+    if remote.get("state") != wanted_state:
+        raise gh_publication.PublicationError(
+            f"persisted review state is {remote.get('state')!r}, expected {wanted_state}"
+        )
+    if not gh_publication.same_text(remote.get("body"), body):
+        raise gh_publication.PublicationError("persisted review body differs from the published body")
+    if not inline_comments:
+        return
+    persisted = gh_publication.paginate(
+        run_json, f"repos/{repo}/pulls/{pr}/reviews/{review_id}/comments", "inline review comments"
+    )
+    unmatched = list(persisted)
+    for expected in inline_comments:
+        hit = next((item for item in unmatched if _inline_matches(expected, item)), None)
+        if hit is None:
+            raise gh_publication.PublicationError(
+                f"inline comment on {expected['path']}:{expected['line']} did not persist faithfully"
+            )
+        unmatched.remove(hit)
+    if unmatched:
+        raise gh_publication.PublicationError(
+            f"the review persisted {len(unmatched)} inline comment(s) that were not published"
+        )
+
+
+def verify_persisted_summary(
+    repo: str, pr: int, *, comment_id: int, actor: str, marker: str, summary: str
+) -> None:
+    """Re-read the summary comment, and prove it is the only marked one for this head."""
+    remote = gh_publication.fetch_object(
+        run_json, f"repos/{repo}/issues/comments/{comment_id}", "summary comment"
+    )
+    gh_publication.verify_comment(
+        remote, comment_id=comment_id, actor=actor, marker=marker, body=summary, pr=pr,
+        label="summary comment",
+    )
+    comments = gh_publication.paginate(run_json, f"repos/{repo}/issues/{pr}/comments", "issue comments")
+    gh_publication.verify_single_marked(
+        comments, actor=actor, marker=marker, comment_id=comment_id, label="summary comment"
+    )
 
 
 def main() -> None:
@@ -154,37 +250,30 @@ def main() -> None:
             "comments": inline_comments,
         },
     )
+    review_id = review.get("id")
+    if not isinstance(review_id, int):
+        raise SystemExit("REVIEW_PUBLICATION=FAIL: the created review returned no id")
 
-    comments = run_json("gh", "api", f"repos/{args.repo}/issues/{args.pr}/comments?per_page=100")
-    existing = next(
-        (
-            comment for comment in comments
-            if comment.get("user", {}).get("login", "").lower() == actor.lower()
-            and marker in comment.get("body", "")
-        ),
-        None,
-    )
-    if existing:
-        summary_comment = run_json(
-            "gh", "api", "--method", "PATCH",
-            f"repos/{args.repo}/issues/comments/{existing['id']}", "--input", "-",
-            stdin={"body": summary},
+    try:
+        summary_id = publish_summary(args.repo, args.pr, actor=actor, marker=marker, summary=summary)
+        live_after = run_json("gh", "api", f"repos/{args.repo}/pulls/{args.pr}")["head"]["sha"]
+        if live_after != expected:
+            raise SystemExit("REVIEW_PUBLICATION=FAIL: live head changed during publication")
+        # A write response is not evidence. Re-read every persisted object and compare.
+        verify_persisted_review(
+            args.repo, args.pr, review_id=review_id, expected_head=expected, event=event,
+            body=review_body, inline_comments=inline_comments,
         )
-    else:
-        summary_comment = run_json(
-            "gh", "api", "--method", "POST",
-            f"repos/{args.repo}/issues/{args.pr}/comments", "--input", "-",
-            stdin={"body": summary},
+        verify_persisted_summary(
+            args.repo, args.pr, comment_id=summary_id, actor=actor, marker=marker, summary=summary
         )
-
-    live_after = run_json("gh", "api", f"repos/{args.repo}/pulls/{args.pr}")["head"]["sha"]
-    if live_after != expected:
-        raise SystemExit("REVIEW_PUBLICATION=FAIL: live head changed during publication")
-    if review.get("commit_id") != expected or marker not in summary_comment.get("body", ""):
-        raise SystemExit("REVIEW_PUBLICATION=FAIL: remote publication proof mismatch")
+    except gh_publication.PublicationError as error:
+        raise SystemExit(
+            f"REVIEW_PUBLICATION=FAIL: {error} (review_id={review_id}; inspect the pull request)"
+        ) from error
     print(
         f"REVIEW_PUBLICATION=PASS level={args.level} verdict={args.verdict} "
-        f"head={expected} review_id={review['id']} comment_id={summary_comment['id']}"
+        f"head={expected} review_id={review_id} comment_id={summary_id}"
     )
 
 

@@ -191,8 +191,15 @@ updates the existing marked summary instead of creating comment spam.
 
 Read the published state back: re-query reviews and comments and prove that the
 formal verdict, the inline comments, and the marked summary exist on the
-expected head. Follow the [review-state protocol](references/review-state-protocol.md)
-when reporting the resulting state.
+expected head. The publisher does this itself, from persisted objects: after writing,
+it fetches the formal review (id, commit, state, body) and its inline comments, and
+the summary comment (id, author, pull request, marker, body), and prints
+`REVIEW_PUBLICATION=PASS` only when each matches what was published and exactly one
+marked summary exists for the head. A write response is never treated as proof. It
+searches every page of the issue comments, so an existing summary is updated wherever
+it sits in a long thread and never duplicated. Follow the
+[review-state protocol](references/review-state-protocol.md) when reporting the
+resulting state.
 
 Finally require:
 

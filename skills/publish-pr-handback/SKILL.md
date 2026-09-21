@@ -104,11 +104,14 @@ The script fails closed unless:
 - every declared validation run completed successfully with explicit totals;
 - every acceptance entry is complete and `PASS`;
 - the head remains unchanged through publication; and
-- GitHub returns the exact generated marker and body.
+- a separate read of the persisted comment (its id, author, pull request, marker, and
+  full body) matches what was published, and exactly one marked handback exists for
+  the head. The response to the write is never treated as proof.
 
 The script generates the comment. Repeated execution on an unchanged head updates
 the same marked comment (only one authored by the same actor) rather than creating
-duplicates. Report review readiness only after it prints
+duplicates, and it searches every page of the comment thread, so an existing handback
+is found however long the thread is. Report review readiness only after it prints
 `AUTHOR_HANDBACK_PUBLICATION=PASS`; any failure prints
 `AUTHOR_HANDBACK_PUBLICATION=FAIL` with the reason and exits non-zero.
 

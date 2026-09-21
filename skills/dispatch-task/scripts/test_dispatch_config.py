@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import dispatch_config as dc
@@ -209,6 +210,101 @@ class DispatchConfigTest(unittest.TestCase):
         source = Path(dc.__file__).read_text(encoding="utf-8").lower()
         for banned in ("score2gp", "tticom", "orca", "/home/"):
             self.assertNotIn(banned, source)
+
+
+class StrictAuthorityTest(unittest.TestCase):
+    """Task authority decides what may be dispatched, so it is read strictly or not at all."""
+
+    MARKER = b"NO_ACTIVE_TASK_APPROVED"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        project(self.tmp)
+        self.active = self.tmp / "governance/ACTIVE_TASK.md"
+        self.control = self.tmp / "governance/AGENT_CONTROL.md"
+
+    def resolve(self):
+        return dc.resolve(self.tmp, env={})
+
+    def assert_stops(self, result, status="STOP_INVALID_AUTHORITY"):
+        self.assertEqual(result["status"], status, result)
+        self.assertNotIn(result["status"], {"READY", "HANDOFF_ONLY"})
+        self.assertIsNone(result["mode"])
+        self.assertTrue(result["errors"])
+
+    def test_undecodable_task_authority_stops(self):
+        self.active.write_bytes(b"Status: ACTIVE \xff\xfe\x00 not utf-8")
+        result = self.resolve()
+        self.assert_stops(result)
+        self.assertIn("ACTIVE_TASK.md", result["errors"][0])
+        self.assertIn("faithfully", result["errors"][0])
+
+    def test_corruption_inside_a_no_task_marker_cannot_fail_open(self):
+        """With errors='replace' the marker no longer matches and dispatch would proceed."""
+        self.active.write_bytes(b"Status: NO_ACTIVE_TASK_\xffAPPROVED\n")
+        self.assert_stops(self.resolve())
+        self.active.write_bytes(b"\xff" + self.MARKER)
+        self.assert_stops(self.resolve())
+
+    def test_a_read_or_permission_failure_on_the_task_authority_stops(self):
+        original = Path.read_text
+        active = self.active.resolve()
+
+        def deny(path, *args, **kwargs):
+            if Path(path).resolve() == active:
+                raise PermissionError("access denied")
+            return original(path, *args, **kwargs)
+
+        with unittest.mock.patch.object(Path, "read_text", deny):
+            result = self.resolve()
+        self.assert_stops(result)
+        self.assertIn("access denied", result["errors"][0])
+
+    def test_undecodable_control_documents_also_stop(self):
+        self.control.write_bytes(b"\x80\x81 rules")
+        result = self.resolve()
+        self.assert_stops(result)
+        self.assertIn("AGENT_CONTROL.md", result["errors"][0])
+
+    def test_valid_utf8_authority_still_dispatches(self):
+        self.active.write_text("Task: T-1 \u2014 na\u00efve caf\u00e9\nStatus: ACTIVE\n", encoding="utf-8")
+        self.control.write_text("r\u00e8gles\n", encoding="utf-8")
+        result = self.resolve()
+        self.assertEqual(result["status"], "READY")
+        self.assertFalse(result["authority"]["no_active_task"])
+
+    def test_a_valid_no_task_marker_still_stops_as_no_active_task(self):
+        self.active.write_bytes(b"Status: " + self.MARKER + b"\n")
+        self.assert_stops(self.resolve(), "STOP_NO_ACTIVE_TASK")
+
+    def test_a_byte_order_mark_is_not_corruption(self):
+        self.active.write_bytes(b"\xef\xbb\xbf" + self.MARKER)
+        self.assert_stops(self.resolve(), "STOP_NO_ACTIVE_TASK")
+        self.active.write_bytes(b"\xef\xbb\xbfStatus: ACTIVE\n")
+        self.assertEqual(self.resolve()["status"], "READY")
+
+    def test_the_marker_list_is_not_consulted_for_unreadable_authority(self):
+        self.active.write_bytes(b"\xff\xff")
+        result = self.resolve()
+        self.assertFalse(result.get("authority", {}).get("no_active_task", False))
+        self.assert_stops(result)
+
+    def test_undecodable_configuration_is_a_clean_stop_not_a_traceback(self):
+        (self.tmp / "agentops-dispatch.json").write_bytes(b'{"schema": "\xff"}')
+        result = self.resolve()
+        self.assert_stops(result, "STOP_INVALID_CONFIG")
+
+    def test_exit_status_and_output_for_invalid_authority(self):
+        self.active.write_bytes(b"\xff\xfe")
+        out = subprocess.run([sys.executable, str(Path(dc.__file__)), "--project", str(self.tmp)],
+                             capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(out.returncode, 3)
+        data = json.loads(out.stdout)
+        self.assertEqual(data["status"], "STOP_INVALID_AUTHORITY")
+        self.assertIn("STOP_INVALID_AUTHORITY", dc.STOP_STATUSES)
+        self.assertIn("Stop.", data["notice"])
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ def normalised(path: Path) -> bytes:
 # skill stays self-contained. Editing a copy without the source fails this test.
 VENDORED = {
     "identity-safe-git/scripts/role_authority_gate.py": ["code-review/scripts/role_authority_gate.py"],
+    "code-review/scripts/gh_publication.py": ["publish-pr-handback/scripts/gh_publication.py"],
 }
 
 

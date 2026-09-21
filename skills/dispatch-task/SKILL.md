@@ -41,6 +41,7 @@ root, or a file named by `--config` or `AGENTOPS_DISPATCH_CONFIG`. Read
 | `STOP_CONFLICT` | more than one differing configuration | stop and report which; never pick one |
 | `STOP_INVALID_CONFIG` | unreadable or malformed | stop and report the exact error |
 | `STOP_AUTHORITY_MISSING` | a declared authority document is absent | stop and report the path |
+| `STOP_INVALID_AUTHORITY` | a declared authority document exists but cannot be read faithfully (not valid UTF-8, or unreadable) | stop and report the path and error; never guess its contents |
 | `STOP_NO_ACTIVE_TASK` | the task authority says no task is approved | stop and report; do not invent one |
 
 Any `STOP_*` status is terminal. Report the status and its message exactly and do

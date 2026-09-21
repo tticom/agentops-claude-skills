@@ -72,11 +72,15 @@ directory.** A skill whose prerequisite is missing stops and reports
 | `dispatch-task` | `identity-safe-git`, `durable-handoff` |
 | `verified-implementation` | `code-review` (its code-smell contract only) |
 
-### Vendored helper
+### Vendored helpers
 
-To keep `code-review` self-contained, it carries a byte-identical copy of
-`identity-safe-git`'s `role_authority_gate.py`. A test fails if the copy drifts.
-Edit the canonical file in `identity-safe-git` and re-copy it.
+To keep skills self-contained, some helpers are carried as byte-identical copies. A
+test fails if a copy drifts; edit the canonical file and re-copy it.
+
+| Helper | Canonical location | Copied into |
+|---|---|---|
+| `role_authority_gate.py` | `identity-safe-git` | `code-review` |
+| `gh_publication.py` (pagination and persisted read-back) | `code-review` | `publish-pr-handback` |
 
 ## Project configuration lives in the project
 

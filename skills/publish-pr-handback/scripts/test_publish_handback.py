@@ -196,34 +196,63 @@ MARKER = f"<!-- author-handback:{HEAD} -->"
 PATHS = ["src/a.py", "tests/test_a.py"]
 
 
-class FakeGh:
-    """Replaces run_json/run_text; echoes posted bodies so read-back can be compared."""
+ISSUE_URL = "https://api.github.com/repos/owner/repo/issues/123"
 
-    def __init__(self, *, actor="author", heads=(HEAD,), comments=None, echo=True,
-                 status="", local_head=HEAD, branch="feature/branch", paths=PATHS):
-        self.actor, self.heads, self.comments = actor, list(heads), comments or []
-        self.echo, self.status, self.local_head = echo, status, local_head
-        self.branch, self.paths = branch, paths
+
+class FakeGh:
+    """A stateful remote replacing run_json/run_text.
+
+    Writes mutate a store and reads are served from it, so a publication is verified
+    by a genuine second read. ``tamper`` changes only what a later GET returns, which
+    models a write that "succeeded" without persisting faithfully.
+    """
+
+    def __init__(self, *, actor="author", heads=(HEAD,), comments=None, status="",
+                 local_head=HEAD, branch="feature/branch", paths=PATHS, page_size=100):
+        self.actor, self.heads = actor, list(heads)
+        self.status, self.local_head, self.branch, self.paths = status, local_head, branch, paths
+        self.page_size = page_size
+        self.store = [{"issue_url": ISSUE_URL, **dict(item)} for item in (comments or [])]
+        self.next_id = 1000
+        self.tamper, self.get_fails = {}, set()
         self.calls, self.writes = [], []
 
     def run_json(self, *args, stdin=None):
         self.calls.append(args)
-        endpoint = args[-1]
         if args == ("gh", "api", "user"):
             return {"login": self.actor}
-        if endpoint == "repos/owner/repo/pulls/123":
-            head = self.heads.pop(0) if len(self.heads) > 1 else self.heads[0]
-            state = pr_state()
-            state["head"]["sha"] = head
-            return state
-        if "/pulls/123/files" in endpoint:
-            return [{"filename": path} for path in self.paths]
-        if endpoint.endswith("issues/123/comments?per_page=100"):
-            return self.comments
-        if "POST" in args or "PATCH" in args:
+        method = args[args.index("--method") + 1] if "--method" in args else "GET"
+        endpoint = args[args.index("--method") + 2] if "--method" in args else args[-1]
+        path, _, query = endpoint.partition("?")
+        params = dict(part.split("=") for part in query.split("&")) if query else {}
+        page = int(params.get("page", 1))
+        if method == "GET":
+            if path == "repos/owner/repo/pulls/123":
+                head = self.heads.pop(0) if len(self.heads) > 1 else self.heads[0]
+                state = pr_state()
+                state["head"]["sha"] = head
+                return state
+            if path == "repos/owner/repo/pulls/123/files":
+                return [{"filename": name} for name in self.paths] if page == 1 else []
+            if path == "repos/owner/repo/issues/123/comments":
+                return self.store[(page - 1) * self.page_size: page * self.page_size]
+            if path.startswith("repos/owner/repo/issues/comments/"):
+                if "comment" in self.get_fails:
+                    raise subprocess.CalledProcessError(1, list(args), stderr="HTTP 404")
+                found = next(c for c in self.store if c["id"] == int(path.rsplit("/", 1)[1]))
+                return self.tamper.get("comment", lambda value: value)(json.loads(json.dumps(found)))
+        if method == "POST" and path == "repos/owner/repo/issues/123/comments":
             self.writes.append((args, stdin))
-            body = stdin["body"] if self.echo else "tampered"
-            return {"id": 77, "body": body}
+            self.next_id += 1
+            comment = {"id": self.next_id, "user": {"login": self.actor}, "body": stdin["body"],
+                       "issue_url": ISSUE_URL}
+            self.store.append(comment)
+            return dict(comment)
+        if method == "PATCH" and path.startswith("repos/owner/repo/issues/comments/"):
+            self.writes.append((args, stdin))
+            found = next(c for c in self.store if c["id"] == int(path.rsplit("/", 1)[1]))
+            found["body"] = stdin["body"]
+            return dict(found)
         raise AssertionError(f"unexpected gh call: {args}")
 
     def run_text(self, *args, cwd=None):
@@ -234,6 +263,18 @@ class FakeGh:
         if args[:3] == ("git", "status", "--porcelain"):
             return self.status
         raise AssertionError(f"unexpected command: {args}")
+
+    def marked(self, user=None):
+        return [c for c in self.store if MARKER in c["body"]
+                and (user is None or c["user"]["login"].lower() == user.lower())]
+
+
+def marker_comment(comment_id, user="author", text=" old"):
+    return {"id": comment_id, "user": {"login": user}, "body": MARKER + text}
+
+
+def noise(count, start=1):
+    return [{"id": start + i, "user": {"login": "someone"}, "body": f"chatter {i}"} for i in range(count)]
 
 
 def run_main(monkeypatch, tmp_path, gh, *extra, state=STATE, head=HEAD, value=None, env=None):
@@ -310,10 +351,120 @@ def test_a_head_that_moves_during_publication_fails(monkeypatch, tmp_path) -> No
         run_main(monkeypatch, tmp_path, gh)
 
 
-def test_readback_that_differs_from_the_generated_body_fails(monkeypatch, tmp_path) -> None:
-    gh = FakeGh(echo=False)
-    with pytest.raises(MODULE.HandbackError, match="readback did not match"):
+# --- a write response is not evidence: the persisted comment must be read back -----
+
+
+def test_publication_reads_the_persisted_comment_back_after_writing(monkeypatch, tmp_path, capsys) -> None:
+    gh = FakeGh()
+    run_main(monkeypatch, tmp_path, gh)
+    assert "AUTHOR_HANDBACK_PUBLICATION=PASS" in capsys.readouterr().out
+    write_at = next(i for i, call in enumerate(gh.calls) if "--method" in call)
+    later_reads = [call[-1] for call in gh.calls[write_at + 1:] if "--method" not in call]
+    assert any(path.startswith("repos/owner/repo/issues/comments/1001") for path in later_reads), later_reads
+
+
+@pytest.mark.parametrize(
+    ("label", "tamper", "message"),
+    [
+        ("altered body", lambda c: {**c, "body": c["body"] + "\nextra claim"}, "body differs"),
+        ("lost marker", lambda c: {**c, "body": "no marker here"}, "lost its marker"),
+        ("other author", lambda c: {**c, "user": {"login": "impostor"}}, "author"),
+        ("other pull request", lambda c: {**c, "issue_url": ISSUE_URL.replace("123", "999")}, "pull request"),
+        ("different id", lambda c: {**c, "id": 424242}, "id"),
+    ],
+)
+def test_a_comment_that_persisted_differently_fails(monkeypatch, tmp_path, capsys, label, tamper, message) -> None:
+    gh = FakeGh()
+    gh.tamper["comment"] = tamper
+    with pytest.raises(MODULE.HandbackError, match=message):
         run_main(monkeypatch, tmp_path, gh)
+    assert "AUTHOR_HANDBACK_PUBLICATION=PASS" not in capsys.readouterr().out
+
+
+def test_a_comment_that_cannot_be_retrieved_after_writing_fails(monkeypatch, tmp_path, capsys) -> None:
+    gh = FakeGh()
+    gh.get_fails.add("comment")
+    with pytest.raises(MODULE.HandbackError, match="cannot re-read"):
+        run_main(monkeypatch, tmp_path, gh)
+    assert "AUTHOR_HANDBACK_PUBLICATION=PASS" not in capsys.readouterr().out
+
+
+def test_line_endings_and_trailing_whitespace_do_not_cause_false_failures(monkeypatch, tmp_path, capsys) -> None:
+    gh = FakeGh()
+    gh.tamper["comment"] = lambda c: {**c, "body": c["body"].replace("\n", "\r\n") + "\n  "}
+    run_main(monkeypatch, tmp_path, gh)
+    assert "AUTHOR_HANDBACK_PUBLICATION=PASS" in capsys.readouterr().out
+
+
+def test_two_marked_handbacks_after_publication_are_reported(monkeypatch, tmp_path) -> None:
+    gh = FakeGh(comments=[marker_comment(1)])
+    original = gh.run_json
+
+    def duplicating(*args, stdin=None):
+        result = original(*args, stdin=stdin)
+        if "PATCH" in args:  # a second marked comment appears concurrently
+            gh.store.append({**marker_comment(9999, text=" dup"), "issue_url": ISSUE_URL})
+        return result
+
+    gh.run_json = duplicating
+    with pytest.raises(MODULE.HandbackError, match="more than one"):
+        run_main(monkeypatch, tmp_path, gh)
+
+
+# --- idempotence must hold however long the comment thread is ----------------------
+
+
+def test_marker_beyond_the_first_page_is_updated_not_duplicated(monkeypatch, tmp_path, capsys) -> None:
+    gh = FakeGh(comments=noise(205) + [marker_comment(50_000)] + noise(10, start=60_000))
+    run_main(monkeypatch, tmp_path, gh)
+    assert len(gh.writes) == 1
+    assert "PATCH" in gh.writes[0][0] and "issues/comments/50000" in gh.writes[0][0][-3]
+    assert len(gh.marked("author")) == 1
+    assert "comment_id=50000" in capsys.readouterr().out
+
+
+def test_every_comment_page_is_requested(monkeypatch, tmp_path) -> None:
+    gh = FakeGh(comments=noise(250) + [marker_comment(50_000)])
+    run_main(monkeypatch, tmp_path, gh)
+    pages = [c[-1] for c in gh.calls if c[-1].startswith("repos/owner/repo/issues/123/comments?")]
+    assert any("page=1" in p for p in pages) and any("page=3" in p for p in pages)
+
+
+def test_a_full_page_is_followed_by_one_more_request(monkeypatch, tmp_path) -> None:
+    gh = FakeGh(comments=noise(99) + [marker_comment(50_000)])  # exactly one full page
+    run_main(monkeypatch, tmp_path, gh)
+    assert len(gh.writes) == 1 and "PATCH" in gh.writes[0][0]
+    pages = [c[-1] for c in gh.calls if c[-1].startswith("repos/owner/repo/issues/123/comments?")]
+    assert any("page=2" in p for p in pages)
+
+
+def test_a_marker_from_another_user_is_not_reused_even_across_pages(monkeypatch, tmp_path) -> None:
+    gh = FakeGh(comments=noise(150) + [marker_comment(50_000, user="someone-else")])
+    run_main(monkeypatch, tmp_path, gh)
+    assert len(gh.writes) == 1 and "POST" in gh.writes[0][0]
+    assert len(gh.marked("author")) == 1 and len(gh.marked("someone-else")) == 1
+
+
+def test_a_marker_for_a_different_head_is_not_reused(monkeypatch, tmp_path) -> None:
+    other = {"id": 5, "user": {"login": "author"}, "body": f"<!-- author-handback:{'c' * 40} -->"}
+    gh = FakeGh(comments=[other])
+    run_main(monkeypatch, tmp_path, gh)
+    assert "POST" in gh.writes[0][0]
+
+
+def test_a_malformed_comment_page_fails_closed(monkeypatch, tmp_path) -> None:
+    gh = FakeGh()
+    original = gh.run_json
+
+    def broken(*args, stdin=None):
+        if "--method" not in args and args[-1].startswith("repos/owner/repo/issues/123/comments"):
+            return {"message": "rate limited"}
+        return original(*args, stdin=stdin)
+
+    gh.run_json = broken
+    with pytest.raises(MODULE.HandbackError, match="was not a list"):
+        run_main(monkeypatch, tmp_path, gh)
+    assert gh.writes == []
 
 
 @pytest.mark.parametrize(

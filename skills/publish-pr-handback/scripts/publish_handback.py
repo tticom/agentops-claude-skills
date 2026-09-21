@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import gh_publication
+
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 # The hand-off state is project vocabulary. The default is neutral; a project that
@@ -329,51 +331,55 @@ def main() -> None:
         print(f"AUTHOR_HANDBACK_PUBLICATION=DRY_RUN_PASS head={live_head}")
         return
 
-    comments = run_json("gh", "api", f"repos/{args.repo}/issues/{args.pr}/comments?per_page=100")
-    existing = next(
-        (
-            comment
-            for comment in comments
-            if str((comment.get("user") or {}).get("login", "")).lower() == actor.lower()
-            and marker in str(comment.get("body", ""))
-        ),
-        None,
-    )
-    if existing:
-        published = run_json(
-            "gh",
-            "api",
-            "--method",
-            "PATCH",
-            f"repos/{args.repo}/issues/comments/{existing['id']}",
-            "--input",
-            "-",
-            stdin={"body": body},
+    try:
+        # Search every page: an existing handback beyond the first 100 comments must be
+        # updated, never duplicated.
+        comments = gh_publication.paginate(
+            run_json, f"repos/{args.repo}/issues/{args.pr}/comments", "issue comments"
         )
-    else:
-        published = run_json(
-            "gh",
-            "api",
-            "--method",
-            "POST",
-            f"repos/{args.repo}/issues/{args.pr}/comments",
-            "--input",
-            "-",
-            stdin={"body": body},
-        )
+        actor_marked = gh_publication.marked_comments(comments, actor=actor, marker=marker)
+        if actor_marked:
+            published = run_json(
+                "gh", "api", "--method", "PATCH",
+                f"repos/{args.repo}/issues/comments/{actor_marked[0]['id']}", "--input", "-",
+                stdin={"body": body},
+            )
+        else:
+            published = run_json(
+                "gh", "api", "--method", "POST",
+                f"repos/{args.repo}/issues/{args.pr}/comments", "--input", "-",
+                stdin={"body": body},
+            )
+        comment_id = published.get("id") if isinstance(published, dict) else None
+        if not isinstance(comment_id, int):
+            raise HandbackError("the handback write returned no comment id")
 
-    live_after = require_full_sha(
-        (run_json("gh", "api", f"repos/{args.repo}/pulls/{args.pr}").get("head") or {}).get("sha"),
-        "post-publication live head",
-    )
-    published_body = str(published.get("body", ""))
-    if live_after != live_head:
-        raise HandbackError("live head changed during handback publication")
-    if marker not in published_body or published_body != body:
-        raise HandbackError("GitHub handback readback did not match generated body")
+        live_after = require_full_sha(
+            (run_json("gh", "api", f"repos/{args.repo}/pulls/{args.pr}").get("head") or {}).get("sha"),
+            "post-publication live head",
+        )
+        if live_after != live_head:
+            raise HandbackError("live head changed during handback publication")
+
+        # A write response is not evidence. Re-read the persisted comment and compare it.
+        remote = gh_publication.fetch_object(
+            run_json, f"repos/{args.repo}/issues/comments/{comment_id}", "handback comment"
+        )
+        gh_publication.verify_comment(
+            remote, comment_id=comment_id, actor=actor, marker=marker, body=body, pr=args.pr,
+            label="handback comment",
+        )
+        gh_publication.verify_single_marked(
+            gh_publication.paginate(
+                run_json, f"repos/{args.repo}/issues/{args.pr}/comments", "issue comments"
+            ),
+            actor=actor, marker=marker, comment_id=comment_id, label="handback comment",
+        )
+    except gh_publication.PublicationError as error:
+        raise HandbackError(str(error)) from error
     print(
         "AUTHOR_HANDBACK_PUBLICATION=PASS "
-        f"head={live_head} comment_id={published.get('id')} state={args.state}"
+        f"head={live_head} comment_id={comment_id} state={args.state}"
     )
 
 

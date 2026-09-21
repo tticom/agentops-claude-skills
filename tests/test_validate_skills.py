@@ -605,3 +605,35 @@ def test_repo_prefixed_reference_keeps_placeholder_and_prose_guards(tmp_path: Pa
         "Layout is skills/<name>/scripts/ and the skills/ directory holds skills/alpha itself.",
     )
     assert codes(tmp_path) == []
+
+
+# --- narrow extension: interpreter bytecode in __pycache__ is not distributed source ---
+
+
+def test_bytecode_inside_pycache_is_ignored(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / "skills/alpha/scripts/__pycache__/tool.cpython-311.pyc", b"\xcb\r\r\n\x00\xff")
+    write_bytes(tmp_path / "skills/alpha/scripts/__pycache__/tool.cpython-311.opt-1.pyo", b"\xcb\xff")
+    assert codes(tmp_path) == []
+
+
+def test_bytecode_outside_pycache_is_still_rejected(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / "skills/alpha/scripts/tool.pyc", b"\xcb\r\r\n\x00\xff")
+    write_bytes(tmp_path / "skills/alpha/tool.cpython-311.pyc", b"\xcb\xff")
+    assert codes(tmp_path) == ["NON_UTF8_FILE", "NON_UTF8_FILE"]
+
+
+def test_other_files_inside_pycache_are_still_validated(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / "skills/alpha/scripts/__pycache__/notes.bin", b"\xff\xfe\x00")
+    write(tmp_path / "skills/alpha/scripts/__pycache__/leak.py", "# Gemini\n")
+    write(tmp_path / "skills/alpha/scripts/__pycache__/bad.py", "def broken(:\n")
+    assert sorted(codes(tmp_path)) == ["FORBIDDEN_HARNESS_REFERENCE", "NON_UTF8_FILE", "PYTHON_SYNTAX"]
+
+
+def test_bytecode_in_a_directory_that_only_resembles_pycache_is_rejected(tmp_path: Path) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / "skills/alpha/scripts/__pycache__x/tool.pyc", b"\xcb\xff")
+    write_bytes(tmp_path / "skills/alpha/scripts/pycache/tool.pyc", b"\xcb\xff")
+    assert codes(tmp_path) == ["NON_UTF8_FILE", "NON_UTF8_FILE"]

@@ -106,7 +106,8 @@ The script fails closed unless:
 - the head remains unchanged through publication; and
 - a separate read of the persisted comment (its id, author, pull request, marker, and
   full body) matches what was published, and exactly one marked handback exists for
-  the head. The response to the write is never treated as proof.
+  the head. The response to the write is never treated as proof, and a non-object element in a
+  fetched comment list is a failure, never filtered out.
 
 The script generates the comment. Repeated execution on an unchanged head updates
 the same marked comment (only one authored by the same actor) rather than creating

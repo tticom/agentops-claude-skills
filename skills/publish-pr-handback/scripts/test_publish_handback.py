@@ -491,6 +491,45 @@ def test_non_object_packet_is_refused(monkeypatch, tmp_path) -> None:
         run_main(monkeypatch, tmp_path, FakeGh(), value=[])
 
 
+@pytest.mark.parametrize("bad", [None, "text", 7, [], True])
+def test_a_non_object_comment_element_fails_closed(monkeypatch, tmp_path, capsys, bad) -> None:
+    """A null inside a valid comment list is a failure, never silently filtered out."""
+    gh = FakeGh(comments=noise(3))
+    original = gh.run_json
+
+    def poisoned(*args, stdin=None):
+        result = original(*args, stdin=stdin)
+        if "--method" not in args and args[-1].startswith("repos/owner/repo/issues/123/comments"):
+            return list(result) + [bad]
+        return result
+
+    gh.run_json = poisoned
+    with pytest.raises(MODULE.HandbackError, match="not an object"):
+        run_main(monkeypatch, tmp_path, gh)
+    assert gh.writes == []
+    assert "AUTHOR_HANDBACK_PUBLICATION=PASS" not in capsys.readouterr().out
+
+
+def test_a_malformed_element_seen_only_after_publication_still_fails(monkeypatch, tmp_path, capsys) -> None:
+    """The post-write uniqueness listing is held to the same standard as the first one."""
+    gh = FakeGh()
+    original = gh.run_json
+    seen = {"listings": 0}
+
+    def poisoned_second_listing(*args, stdin=None):
+        result = original(*args, stdin=stdin)
+        if "--method" not in args and args[-1].startswith("repos/owner/repo/issues/123/comments"):
+            seen["listings"] += 1
+            if seen["listings"] == 2:
+                return list(result) + [None]
+        return result
+
+    gh.run_json = poisoned_second_listing
+    with pytest.raises(MODULE.HandbackError, match="not an object"):
+        run_main(monkeypatch, tmp_path, gh)
+    assert "AUTHOR_HANDBACK_PUBLICATION=PASS" not in capsys.readouterr().out
+
+
 # --- hand-off state is project vocabulary, not built in ---------------------
 
 

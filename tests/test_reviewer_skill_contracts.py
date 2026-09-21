@@ -87,6 +87,7 @@ def test_publication_is_read_back_and_leaves_the_reviewed_repository_clean() -> 
     basic = read(BASIC)
     assert "Read the published state back" in basic
     assert "A write response is never treated as proof" in basic
+    assert "non-object element in any fetched list is a failure" in basic
     assert "complete inline-comment collection" in basic
     assert "where a missing value never matches" in basic
     assert "searches every page of the issue comments" in basic
@@ -154,7 +155,8 @@ def test_handback_contract_refuses_unproven_states() -> None:
     text = read("publish-pr-handback/SKILL.md")
     for phrase in ("AUTHOR_HANDBACK_PUBLICATION=PASS", "outside the worktree", "`NOT_RUN`",
                    "Repeated execution on an unchanged head", "author-handback.v1",
-                   "separate read of the persisted comment", "every page of the comment thread"):
+                   "separate read of the persisted comment", "every page of the comment thread",
+                   "non-object element in a fetched comment list is a failure"):
         assert phrase in text
 
 

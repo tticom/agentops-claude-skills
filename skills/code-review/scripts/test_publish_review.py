@@ -626,5 +626,58 @@ class InlineReadBackCompletenessTest(unittest.TestCase):
         self.assertTrue(any("page=2" in p for p in pages))
 
 
+class MalformedRemoteElementTest(unittest.TestCase):
+    """A null (or any non-object) element inside a valid list is a failure, not noise."""
+
+    COMMENT = {"path": "a.py", "line": 3, "side": "RIGHT", "body": "finding"}
+
+    def run_with(self, tamper, inline):
+        gh = FakeGh()
+        gh.tamper["review_comments"] = tamper
+        return Run(self, gh=gh, inline=inline)
+
+    def test_zero_expected_and_a_null_remote_element_fails(self):
+        """Reviewer reproduction: [null] must not become [] and pass."""
+        run = self.run_with(lambda items: items + [None], inline=[])
+        with self.assertRaisesRegex(SystemExit, "REVIEW_PUBLICATION=FAIL.*not an object"):
+            run.go()
+
+    def test_one_valid_expected_plus_a_null_extra_element_fails(self):
+        """Reviewer reproduction: [valid, null] must not collapse to one item and pass."""
+        run = self.run_with(lambda items: items + [None], inline=[self.COMMENT])
+        with self.assertRaisesRegex(SystemExit, "REVIEW_PUBLICATION=FAIL.*not an object"):
+            run.go()
+
+    def test_every_kind_of_non_object_element_fails(self):
+        for bad in (None, "text", 7, [], True):
+            with self.subTest(bad=bad):
+                run = self.run_with(lambda items, b=bad: items + [b], inline=[self.COMMENT])
+                with self.assertRaisesRegex(SystemExit, "REVIEW_PUBLICATION=FAIL.*not an object"):
+                    run.go()
+
+    def test_a_malformed_issue_comment_element_fails_before_any_write_is_trusted(self):
+        gh = FakeGh(comments=noise(3))
+        original = gh.__call__
+
+        def poisoned(*args, stdin=None):
+            result = original(*args, stdin=stdin)
+            if "--method" not in args and args[-1].startswith(f"repos/{REPO}/issues/{PR}/comments"):
+                return list(result) + [None]
+            return result
+
+        run = Run(self, gh=gh)
+        with patch.object(publish_review, "run_json", side_effect=poisoned), patch.object(sys, "argv", run.argv), \
+                patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != "AGENTOPS_ROLE_POLICY"}), \
+                patch("sys.stdout", new_callable=io.StringIO):
+            with self.assertRaisesRegex(SystemExit, "REVIEW_PUBLICATION=FAIL.*not an object"):
+                main()
+
+    def test_well_formed_collections_still_pass(self):
+        for inline in ([], [self.COMMENT]):
+            with self.subTest(inline=inline):
+                run = self.run_with(lambda items: items, inline=inline)
+                self.assertIn("REVIEW_PUBLICATION=PASS", run.go().output)
+
+
 if __name__ == "__main__":
     unittest.main()

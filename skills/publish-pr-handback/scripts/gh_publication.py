@@ -59,6 +59,10 @@ def paginate(run_json: RunJson, endpoint: str, what: str) -> list[dict[str, Any]
 
     A page that is exactly full is followed by one more request, so a list whose
     length is a multiple of the page size is still read completely.
+
+    Every element must be an object. A malformed element is an error, never silently
+    dropped: filtering would turn a remote ``[null]`` into ``[]`` and let an exact
+    cardinality check pass on a collection that actually held something unexpected.
     """
     items: list[dict[str, Any]] = []
     separator = "&" if "?" in endpoint else "?"
@@ -66,7 +70,12 @@ def paginate(run_json: RunJson, endpoint: str, what: str) -> list[dict[str, Any]
         chunk = fetch(run_json, f"{endpoint}{separator}per_page={PAGE_SIZE}&page={page}", what)
         if not isinstance(chunk, list):
             raise PublicationError(f"{what} page {page} was not a list: {str(chunk)[:80]!r}")
-        items.extend(item for item in chunk if isinstance(item, dict))
+        for position, item in enumerate(chunk):
+            if not isinstance(item, dict):
+                raise PublicationError(
+                    f"{what} page {page} item {position} is not an object: {str(item)[:80]!r}"
+                )
+        items.extend(chunk)
         if len(chunk) < PAGE_SIZE:
             return items
     raise PublicationError(f"{what} exceeded {MAX_PAGES} pages; refusing to guess")

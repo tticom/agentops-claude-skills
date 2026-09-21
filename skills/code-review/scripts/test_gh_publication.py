@@ -69,11 +69,47 @@ class PaginateTest(unittest.TestCase):
         with self.assertRaisesRegex(gp.PublicationError, "exceeded"):
             gp.paginate(lambda *a: [{"id": 1}] * gp.PAGE_SIZE, "repos/o/r/x", "items")
 
-    def test_non_object_items_are_dropped_from_a_page(self):
-        pages = {1: [{"id": 1}, "junk", None, 3], 2: []}
-        got = gp.paginate(lambda *a: pages[int(a[-1].rsplit("page=", 1)[1])] if len(pages[1]) >= 0 else [],
-                          "repos/o/r/x", "items")
-        self.assertEqual(got, [{"id": 1}])
+    def test_a_non_object_element_is_rejected_never_silently_dropped(self):
+        """Filtering would turn a remote [null] into [] and defeat exact cardinality."""
+        for bad in (None, "junk", 3, 1.5, True, [], [{"id": 1}]):
+            for label, page in (("alone", [bad]), ("after a valid item", [{"id": 1}, bad]),
+                                ("before a valid item", [bad, {"id": 1}])):
+                with self.subTest(bad=bad, label=label):
+                    with self.assertRaisesRegex(gp.PublicationError, r"page 1 item \d+ is not an object"):
+                        gp.paginate(lambda *a, page=page: page, "repos/o/r/x", "items")
+
+    def test_the_error_names_the_page_and_position_of_the_bad_element(self):
+        pages = {1: [{"id": n} for n in range(gp.PAGE_SIZE)], 2: [{"id": 1}, None]}
+        with self.assertRaisesRegex(gp.PublicationError, r"items page 2 item 1 is not an object"):
+            gp.paginate(lambda *a: pages[int(a[-1].rsplit("page=", 1)[1])], "repos/o/r/x", "items")
+
+    def test_a_malformed_element_at_the_end_of_a_full_page_is_still_caught(self):
+        page = [{"id": n} for n in range(gp.PAGE_SIZE - 1)] + [None]
+        requested = []
+
+        def run_json(*args):
+            requested.append(args[-1])
+            return page
+
+        with self.assertRaisesRegex(gp.PublicationError, r"item 99 is not an object"):
+            gp.paginate(run_json, "repos/o/r/x", "items")
+        self.assertEqual(len(requested), 1, "it must stop at the bad page, not continue paginating")
+
+    def test_a_page_of_only_objects_is_returned_whole_and_in_order(self):
+        page = [{"id": 3}, {"id": 1}, {"id": 2}]
+        self.assertEqual(gp.paginate(lambda *a: page, "repos/o/r/x", "items"), page)
+        self.assertEqual(gp.paginate(lambda *a: [], "repos/o/r/x", "items"), [])
+
+    def test_an_exact_cardinality_check_cannot_be_satisfied_by_a_malformed_element(self):
+        """The two publisher shapes from the review: zero expected + [null]; one expected + [valid, null]."""
+        expected_none, expected_one = 0, 1
+        for remote, expected in (([None], expected_none), ([{"id": 1}, None], expected_one)):
+            with self.subTest(remote=remote):
+                try:
+                    persisted = gp.paginate(lambda *a, r=remote: r, "repos/o/r/x", "inline review comments")
+                except gp.PublicationError:
+                    continue  # rejected: the only acceptable outcome
+                self.fail(f"paginate returned {persisted!r}; {len(persisted)} == {expected} would have passed")
 
     def test_fetch_object_requires_an_object(self):
         self.assertEqual(gp.fetch_object(lambda *a: {"id": 1}, "e", "thing"), {"id": 1})

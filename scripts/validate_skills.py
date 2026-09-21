@@ -9,7 +9,8 @@ Checks, for every directory under ``skills/``:
   paths resolve, and never escape the skill directory (each skill must be
   installable on its own);
 * every file is valid UTF-8 (fail closed: an undecodable file is an error, never
-  skipped), except image files under ``assets/``, which are scanned as bytes;
+  skipped), except image, PDF and font files under ``assets/``, which are
+  scanned as bytes for forbidden ASCII strings;
 * Python scripts parse, and no symlinks are present;
 * no legacy-lineage, harness-specific or machine-specific strings appear,
   except in provenance files (``NOTICE.md``, ``PROVENANCE.md``, ``LICENSE*``)
@@ -43,7 +44,14 @@ PROVENANCE_FILES = frozenset(
     {"NOTICE.md", "PROVENANCE.md", "LICENSE", "LICENSE.md", "LICENSE.txt"}
 )
 ALLOWED_TOP_LEVEL_FILES = frozenset({".gitkeep"})
-BINARY_ASSET_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico"})
+# Non-inspected, non-executable asset formats. Anything else must decode as UTF-8.
+BINARY_ASSET_SUFFIXES = frozenset(
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp",
+        ".pdf",
+        ".ttf", ".otf", ".woff", ".woff2",
+    }
+)
 
 FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
@@ -201,7 +209,7 @@ def _walk(skill_dir: Path) -> tuple[list[Path], list[Path]]:
 
 
 def _is_binary_asset(skill_dir: Path, path: Path) -> bool:
-    """Only image files directly under ``assets/`` may be non-UTF-8."""
+    """Only allowlisted image/PDF/font files under ``assets/`` may be non-UTF-8."""
     parts = path.relative_to(skill_dir).parts
     return (
         len(parts) >= 2
@@ -372,7 +380,7 @@ def validate_skill(root: Path, skill_dir: Path, issues: list[Issue]) -> None:
                         None,
                         "NON_UTF8_FILE",
                         f"not valid UTF-8 ({error.reason} at byte {error.start}); "
-                        "only image files under assets/ may be binary",
+                        "only image, PDF and font files under assets/ may be binary",
                     )
                 )
             continue

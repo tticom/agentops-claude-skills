@@ -330,10 +330,32 @@ def test_non_utf8_file_with_unknown_suffix_is_rejected(tmp_path: Path) -> None:
     assert codes(tmp_path) == ["NON_UTF8_FILE", "NON_UTF8_FILE"]
 
 
-def test_image_under_assets_may_be_binary(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "name", ["logo.png", "photo.JPG", "icon.ico", "guide.pdf", "font.woff2", "font.ttf"]
+)
+def test_allowlisted_binary_asset_under_assets_is_accepted(tmp_path: Path, name: str) -> None:
     make_repo(tmp_path)
-    write_bytes(tmp_path / "skills/alpha/assets/logo.png", b"\x89PNG\r\n\x1a\n\x00\x00")
+    write_bytes(tmp_path / f"skills/alpha/assets/{name}", b"\x89\xff\x00\x01binary\x80")
     assert codes(tmp_path) == []
+
+
+def test_non_decodable_markdown_cannot_bypass_reference_and_forbidden_checks(
+    tmp_path: Path,
+) -> None:
+    make_repo(tmp_path)
+    # Would raise REFERENCE_BROKEN and FORBIDDEN_UPSTREAM_REFERENCE if it were read.
+    write_bytes(
+        tmp_path / "skills/alpha/references/guide.md",
+        b"See [missing](nope.md) and ask Matt. caf\xe9\n",
+    )
+    assert codes(tmp_path) == ["NON_UTF8_FILE"]
+
+
+@pytest.mark.parametrize("name", ["data.json", "notes.txt", "run.sh", "page.svg", "cfg.yaml"])
+def test_inspected_text_types_stay_strict_even_under_assets(tmp_path: Path, name: str) -> None:
+    make_repo(tmp_path)
+    write_bytes(tmp_path / f"skills/alpha/assets/{name}", b"\xff\xfe\x00bad")
+    assert codes(tmp_path) == ["NON_UTF8_FILE"]
 
 
 def test_image_outside_assets_is_rejected(tmp_path: Path) -> None:

@@ -41,7 +41,7 @@ when a skill:
 - links to, or names, a bundled `scripts/`, `references/` or `assets/` path
   that does not exist, or reaches outside its own directory;
 - contains a file that is not valid UTF-8 (undecodable files are errors, never
-  skipped; only image files under `assets/` may be binary), a symlink, or a
+  skipped; only image, PDF and font files under `assets/` may be binary), a symlink, or a
   Python script that does not parse;
 - mentions the retired upstream lineage, retired harnesses, machine-specific
   absolute paths or the legacy bucketed layout. Provenance files

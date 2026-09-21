@@ -53,4 +53,4 @@ Do not write consumer-side file names with a `scripts/`, `references/` or
 
 ## Provenance
 
-See [PROVENANCE.md](PROVENANCE.md).
+See [PROVENANCE.md](PROVENANCE.md). Licensed under the [MIT License](LICENSE).

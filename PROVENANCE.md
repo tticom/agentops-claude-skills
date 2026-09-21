@@ -29,5 +29,8 @@ from third-party work. A skill that keeps such material carries its own
 
 ## License
 
-No license file has been added yet. Until the owner selects one, do not
-redistribute this repository outside the owner's organisation.
+This repository's original work is released under the MIT License (see
+[LICENSE](LICENSE)). It does not replace the notices of any third-party material:
+a skill that includes such material carries a `NOTICE.md` in its root with the
+upstream copyright and license text, and that notice continues to apply to the
+material it covers.

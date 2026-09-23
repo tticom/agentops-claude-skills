@@ -25,6 +25,7 @@ OTHER = "b" * 40
 REPO = "example-org/example"
 PR = 514
 PULL = f"repos/{REPO}/pulls/{PR}"
+FIRST_REVIEW_ID = 1001  # FakeGh numbers objects from 1001 in creation order
 ISSUE_URL = f"https://api.github.com/repos/{REPO}/issues/{PR}"
 POLICY = {"reviewers": ["review-bot", "author-bot"], "never_merge": ["author-bot"]}
 
@@ -78,9 +79,17 @@ class FakeGh:
                 return {"head": {"sha": head}, "user": {"login": self.author}}
             if path == f"repos/{REPO}/issues/{PR}/comments":
                 return sliced(self.issue_comments)
+            if path == f"{PULL}/comments":
+                persisted = [c for review_id in sorted(self.review_comments)
+                             for c in self.review_comments[review_id]]
+                return read("review_comments", sliced(persisted))
             if path.startswith(f"{PULL}/reviews/") and path.endswith("/comments"):
+                # GitHub's per-review endpoint omits the location: line,
+                # original_line and side come back null (only the legacy position).
                 review_id = int(path.split("/")[-2])
-                return read("review_comments", sliced(self.review_comments.get(review_id, [])))
+                legacy = [{**c, "line": None, "original_line": None, "side": None}
+                          for c in self.review_comments.get(review_id, [])]
+                return sliced(legacy)
             if path.startswith(f"{PULL}/reviews/"):
                 return read("review", self.reviews[int(path.rsplit("/", 1)[1])])
             if path.startswith(f"repos/{REPO}/issues/comments/"):
@@ -95,7 +104,9 @@ class FakeGh:
                 "body": stdin["body"], "user": {"login": self.actor},
             }
             self.review_comments[self.next_id] = [
-                {**c, "commit_id": stdin["commit_id"]} for c in stdin.get("comments", [])
+                {**c, "commit_id": stdin["commit_id"], "original_line": c.get("line"),
+                 "pull_request_review_id": self.next_id}
+                for c in stdin.get("comments", [])
             ]
             return dict(self.reviews[self.next_id])
         if method == "POST" and path == f"repos/{REPO}/issues/{PR}/comments":
@@ -272,7 +283,7 @@ class PublicationFlowTest(unittest.TestCase):
                     {"path": "b.py", "line": 9, "side": "LEFT", "body": "finding two"}]
         run = Run(self, inline=comments).go()
         self.assertEqual(run.gh.writes("POST")[0][1]["comments"], comments)
-        self.assertTrue(run.gh.reads("/comments?per_page=100&page=1"))
+        self.assertTrue(run.gh.reads(f"{PULL}/comments?per_page=100&page=1"))
         self.assertIn("REVIEW_PUBLICATION=PASS", run.output)
 
     def test_policy_may_come_from_the_environment(self):
@@ -391,7 +402,8 @@ class PersistedReadBackTest(unittest.TestCase):
             ("missing", lambda items: []),
             ("altered", lambda items: [{**items[0], "body": "different"}]),
             ("moved", lambda items: [{**items[0], "path": "other.py"}]),
-            ("extra", lambda items: items + [{"path": "z.py", "line": 1, "side": "RIGHT", "body": "surprise"}]),
+            ("extra", lambda items: items + [{"path": "z.py", "line": 1, "side": "RIGHT", "body": "surprise",
+                                              "pull_request_review_id": FIRST_REVIEW_ID}]),
         ):
             with self.subTest(label=label):
                 gh = FakeGh()
@@ -577,15 +589,31 @@ class InlineReadBackCompletenessTest(unittest.TestCase):
     def test_the_collection_is_fetched_even_when_no_inline_comments_were_expected(self):
         gh, run = self.publish(inline=[])
         run.go()
-        review_id = next(iter(gh.reviews))
-        self.assertTrue(gh.reads(f"/reviews/{review_id}/comments"), "the inline endpoint was never queried")
+        self.assertTrue(gh.reads(f"{PULL}/comments?"), "the inline endpoint was never queried")
 
     def test_an_unexpected_persisted_comment_fails_when_none_were_submitted(self):
         """Reviewer reproduction: zero expected, one remote."""
-        extra = {"path": "z.py", "line": 1, "side": "RIGHT", "body": "surprise", "commit_id": HEAD}
+        extra = {"path": "z.py", "line": 1, "side": "RIGHT", "body": "surprise", "commit_id": HEAD,
+                 "pull_request_review_id": FIRST_REVIEW_ID}
         gh, run = self.publish(lambda items: items + [extra], inline=[])
         with self.assertRaisesRegex(SystemExit, "REVIEW_PUBLICATION=FAIL.*inline"):
             run.go()
+
+    def test_location_is_read_from_the_pull_request_comment_list(self):
+        """Reviewer reproduction: reviews/{id}/comments returns line and side as null."""
+        gh, run = self.publish()
+        self.assertIn("REVIEW_PUBLICATION=PASS", run.go().output)
+        self.assertTrue(gh.reads(f"{PULL}/comments?"))
+        self.assertFalse(gh.reads(f"/reviews/{FIRST_REVIEW_ID}/comments"),
+                         "the per-review endpoint cannot prove a location")
+
+    def test_comments_from_other_reviews_are_not_counted(self):
+        other = {"path": "z.py", "line": 1, "side": "RIGHT", "body": "earlier review", "commit_id": OTHER,
+                 "pull_request_review_id": FIRST_REVIEW_ID - 1}
+        for inline in ([], [self.COMMENT]):
+            with self.subTest(inline=inline):
+                gh, run = self.publish(lambda items: [other] + items, inline=inline)
+                self.assertIn("REVIEW_PUBLICATION=PASS", run.go().output)
 
     def test_zero_expected_and_zero_persisted_passes(self):
         gh, run = self.publish(inline=[])
@@ -608,7 +636,7 @@ class InlineReadBackCompletenessTest(unittest.TestCase):
         original = gh.__call__
 
         def failing(*args, stdin=None):
-            if "--method" not in args and "/comments?" in args[-1] and "/reviews/" in args[-1]:
+            if "--method" not in args and args[-1].startswith(f"{PULL}/comments?"):
                 raise subprocess.CalledProcessError(1, list(args), stderr="HTTP 502")
             return original(*args, stdin=stdin)
 
@@ -622,7 +650,7 @@ class InlineReadBackCompletenessTest(unittest.TestCase):
         many = [{"path": f"f{n}.py", "line": n + 1, "side": "RIGHT", "body": f"finding {n}"} for n in range(105)]
         gh, run = self.publish(inline=many)
         self.assertIn("REVIEW_PUBLICATION=PASS", run.go().output)
-        pages = [c[0][-1] for c in gh.calls if "--method" not in c[0] and "/reviews/" in c[0][-1] and "comments?" in c[0][-1]]
+        pages = [c[0][-1] for c in gh.calls if "--method" not in c[0] and c[0][-1].startswith(f"{PULL}/comments?")]
         self.assertTrue(any("page=2" in p for p in pages))
 
 

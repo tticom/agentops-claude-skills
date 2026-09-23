@@ -139,9 +139,15 @@ def verify_persisted_review(
 
     # Always read the persisted inline collection, even when none was published: an
     # unexpected comment is exactly what a zero-item check would otherwise never see.
-    persisted = gh_publication.paginate(
-        run_json, f"repos/{repo}/pulls/{pr}/reviews/{review_id}/comments", "inline review comments"
-    )
+    # Read the pull request's comment list, not reviews/{id}/comments: that endpoint
+    # returns line, original_line and side as null, so no location could be proved.
+    persisted = [
+        item
+        for item in gh_publication.paginate(
+            run_json, f"repos/{repo}/pulls/{pr}/comments", "inline review comments"
+        )
+        if item.get("pull_request_review_id") == review_id
+    ]
     if len(persisted) != len(inline_comments):
         raise gh_publication.PublicationError(
             f"the review persisted {len(persisted)} inline comment(s) but "

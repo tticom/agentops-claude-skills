@@ -9,8 +9,9 @@ License reproduced below.
 **Original to this repository:** the remaining structure and requirements of this
 skill, and its bundled scripts, references and tests, were developed for AgentOps.
 
-This notice applies to the derived material only. The MIT License of this
-repository (see the top-level LICENSE) covers this repository's own work.
+This notice applies to the derived material only. This repository's own work is
+proprietary, all rights reserved (see the top-level LICENSE); that does not alter
+the upstream MIT terms below, which continue to apply to the derived material.
 
 ## Upstream license
 

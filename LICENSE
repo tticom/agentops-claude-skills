@@ -1,21 +1,16 @@
-MIT License
+Copyright (c) 2026 Niall Finlay. All rights reserved.
 
-Copyright (c) 2026 tticom
+This repository is proprietary. It is visible publicly for development
+convenience only. No licence is granted to use, copy, modify, merge, publish,
+distribute, sublicense, or sell any part of it, in source or compiled form,
+except for the rights that the hosting platform's terms of service require a
+public repository to grant (on GitHub: viewing and forking through GitHub's own
+functionality). Any other use requires the copyright holder's prior written
+permission.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This notice applies to this revision and all later revisions.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Third-party material remains under its own licence. Skills that are materially
+derived from third-party work carry a NOTICE.md that retains the upstream
+copyright and licence text (see PROVENANCE.md); this notice does not alter those
+terms.

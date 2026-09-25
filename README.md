@@ -136,5 +136,5 @@ Do not write consumer-side file names with a `scripts/`, `references/` or
 ## Provenance
 
 See [PROVENANCE.md](PROVENANCE.md) and the
-[migration inventory](docs/MIGRATION_INVENTORY.md). Licensed under the
-[MIT License](LICENSE).
+[migration inventory](docs/MIGRATION_INVENTORY.md). All rights reserved; see
+[LICENSE](LICENSE). Third-party notices in skill `NOTICE.md` files still apply.

@@ -53,8 +53,8 @@ copied. No upstream plugin, marketplace, or setup skill is part of this reposito
 
 ## License
 
-This repository's original work is released under the MIT License (see
-[LICENSE](LICENSE)). It does not replace the notices of any third-party material:
+This repository's original work is proprietary, all rights reserved (see
+[LICENSE](LICENSE)); earlier revisions were published under the MIT License. It does not replace the notices of any third-party material:
 a skill that includes such material carries a `NOTICE.md` in its root with the
 upstream copyright and license text, and that notice continues to apply to the
 material it covers.

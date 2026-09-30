@@ -144,6 +144,12 @@ Review level: DEVILS_ADVOCATE
 Include the contradiction ledger, reviewer-created probes, the strongest disproved
 or surviving false-success mode, the evidence-gate result, and residual risk.
 
+Before an `APPROVE`, close your own earlier review threads exactly as `code-review`
+requires (re-review of your own earlier threads): verify each at the new exact head,
+reply, and resolve only those verified fixed. The publisher refuses an approval while
+your own threads remain unresolved, and other reviewers' threads are never yours to
+resolve.
+
 The reviewer must publish all review findings, decisions, and comments directly
 to the PR thread. Output left only in the chat is not a review. Do not implement
 fixes or reviewer-process improvements; publish them only as comments for a

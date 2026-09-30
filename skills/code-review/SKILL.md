@@ -149,6 +149,29 @@ was found. Under a no-code-smells policy, `APPROVE` is forbidden while any
 diff-introduced or materially worsened smell remains `CONFIRMED` without a cited
 repository exemption.
 
+### Re-review of your own earlier threads
+
+The reviewer owns its own review threads. The author never resolves them, so an
+approval published over them leaves the merge blocked on unresolved threads. On a
+re-review, before publishing an `APPROVE`:
+
+1. List the PR's unresolved review threads that you authored (the author of a
+   thread is the author of its first comment; your login is `gh api user --jq .login`),
+   using the GraphQL `reviewThreads` connection through `gh api graphql`.
+2. Re-check each one at the NEW exact head by independent reproduction in the
+   detached checkout. Never rely on the author's handback for this.
+3. Fixed: reply once with `Verified fixed at <short-sha>: <one-line evidence>`, then
+   resolve the thread. Not fixed, or only partly: leave it open and the verdict must
+   be `CHANGES_REQUESTED`. Never resolve a thread before you have verified it, and
+   never resolve a thread authored by anyone else.
+4. List each thread id with its disposition (`RESOLVED_VERIFIED` or `OPEN_NOT_FIXED`)
+   in the marked summary's `Findings` line.
+
+Replies and resolutions are review metadata and can supersede an earlier formal
+review. After them, confirm with read-only `gh` that your formal `APPROVE` is still
+the latest review of yours at the exact head, and republish the verdict through the
+guarded publisher if it is not.
+
 Choose exactly one verdict: `APPROVE`, `CHANGES_REQUESTED`, or `CANNOT_VERIFY`.
 
 Re-query the live head immediately before publication. If it differs from the
@@ -170,7 +193,12 @@ python <skill-dir>/scripts/publish_review.py --repo <owner/repo> --pr <number> -
 
 The publisher fails closed when the role policy is missing, the reviewer is the
 PR author, or the live head differs from `--expected-head` before or during
-publication. It creates the formal review, attaches inline comments, and creates
+publication. It also refuses an `APPROVE`, at any level and before any write, while
+unresolved review threads authored by the publishing login remain on the PR, and
+refuses it when that thread query cannot be read or is malformed (including a missing
+or non-Boolean `hasNextPage`) or when an unresolved thread's opening author cannot be
+established; there is no override, and
+`CHANGES_REQUESTED` and `CANNOT_VERIFY` are not affected. It creates the formal review, attaches inline comments, and creates
 or updates exactly one PR issue comment containing:
 
 ```text

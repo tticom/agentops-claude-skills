@@ -38,7 +38,7 @@ class FakeGh:
     """A stateful remote. Attribute hooks alter only what later reads return."""
 
     def __init__(self, *, actor="review-bot", author="author-bot", heads=(HEAD,), comments=None,
-                 page_size=100):
+                 page_size=100, threads=None, thread_page_size=100):
         self.actor, self.author = actor, author
         self.heads = list(heads)
         self.issue_comments = [dict(c) for c in (comments or [])]
@@ -48,6 +48,9 @@ class FakeGh:
         self.tamper = {}      # name -> function(obj) applied to GET results only
         self.get_fails = set()  # names of GETs that raise like a missing object
         self.page_size = page_size
+        self.threads = [dict(t) for t in (threads or [])]  # review threads, served by GraphQL
+        self.thread_page_size = thread_page_size
+        self.graphql_fails = False
 
     # --- request parsing ---------------------------------------------------
     @staticmethod
@@ -60,6 +63,8 @@ class FakeGh:
         self.calls.append((args, stdin))
         if args == ("gh", "api", "user"):
             return {"login": self.actor}
+        if args[:3] == ("gh", "api", "graphql"):
+            return self._graphql(args)
         method, endpoint = self._split(args)
         path, _, query = endpoint.partition("?")
         params = dict(item.split("=") for item in query.split("&")) if query else {}
@@ -122,6 +127,19 @@ class FakeGh:
             return dict(found)
         raise AssertionError(f"unexpected gh call: {args}")
 
+    def _graphql(self, args):
+        if self.graphql_fails:
+            raise gh_error(*args)
+        fields = dict(a.split("=", 1) for a in args[3:] if "=" in a and not a.startswith("query="))
+        start = int(fields.get("cursor", 0))
+        chunk = self.threads[start:start + self.thread_page_size]
+        more = start + self.thread_page_size < len(self.threads)
+        nodes = [{"id": t["id"], "isResolved": t["resolved"], "path": t.get("path"), "line": t.get("line"),
+                  "comments": {"nodes": [{"author": {"login": t["author"]}}]}} for t in chunk]
+        return {"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": more, "endCursor": str(start + self.thread_page_size)},
+            "nodes": nodes}}}}}
+
     def writes(self, method):
         return [c for c in self.calls if "--method" in c[0] and c[0][c[0].index("--method") + 1] == method]
 
@@ -145,6 +163,10 @@ def summary(verdict, level="basic", head=HEAD):
 def marker_comment(comment_id, user="review-bot", level="basic", head=HEAD, text="old"):
     return {"id": comment_id, "user": {"login": user}, "issue_url": ISSUE_URL,
             "body": f"<!-- reviewer-summary:{level}:{head} -->\n{text}"}
+
+
+def thread(thread_id, author="review-bot", resolved=False, path="src/x.py", line=7):
+    return {"id": thread_id, "author": author, "resolved": resolved, "path": path, "line": line}
 
 
 def noise(count, start=1):
@@ -355,6 +377,85 @@ class PublicationFlowTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact reviewed head"):
             run.go()
         self.assertEqual(run.gh.calls, [])
+
+
+class OwnThreadGateTest(unittest.TestCase):
+    """The reviewer owns its threads: an APPROVE over its own unresolved threads is refused."""
+
+    def refused(self, gh, **kwargs):
+        with self.assertRaises(SystemExit) as caught:
+            Run(self, verdict="APPROVE", gh=gh, **kwargs).go()
+        self.assertEqual(gh.writes("POST") + gh.writes("PATCH"), [])
+        return str(caught.exception)
+
+    def test_approve_is_refused_while_own_threads_are_unresolved(self):
+        gh = FakeGh(threads=[thread("PRRT_a"), thread("PRRT_b", resolved=True),
+                             thread("PRRT_c", path="lib/y.py", line=40)])
+        message = self.refused(gh)
+        self.assertIn("REVIEW_PUBLICATION=FAIL: APPROVE refused", message)
+        self.assertIn("2 unresolved review thread(s) authored by review-bot", message)
+        self.assertIn("PRRT_a (src/x.py:7)", message)
+        self.assertIn("PRRT_c (lib/y.py:40)", message)
+        self.assertNotIn("PRRT_b", message)
+
+    def test_login_comparison_ignores_case(self):
+        self.assertIn("PRRT_a", self.refused(FakeGh(threads=[thread("PRRT_a", author="Review-Bot")])))
+
+    def test_approve_is_allowed_with_no_threads_or_only_resolved_own_threads(self):
+        for threads in ([], [thread("PRRT_a", resolved=True)]):
+            with self.subTest(threads=threads):
+                run = Run(self, verdict="APPROVE", gh=FakeGh(threads=threads)).go()
+                self.assertIn("REVIEW_PUBLICATION=PASS", run.output)
+                self.assertEqual(next(iter(run.gh.reviews.values()))["state"], "APPROVED")
+
+    def test_other_authors_unresolved_threads_do_not_block_an_approval(self):
+        gh = FakeGh(threads=[thread("PRRT_a", author="author-bot"), thread("PRRT_b", author="someone-else")])
+        self.assertIn("REVIEW_PUBLICATION=PASS", Run(self, verdict="APPROVE", gh=gh).go().output)
+
+    def test_threads_beyond_the_first_page_are_found(self):
+        threads = [thread(f"PRRT_{n}", author="other") for n in range(5)] + [thread("PRRT_mine")]
+        self.assertIn("PRRT_mine", self.refused(FakeGh(threads=threads, thread_page_size=2)))
+
+    def test_blocking_verdicts_are_not_gated_and_do_not_query_threads(self):
+        for verdict in ("CHANGES_REQUESTED", "CANNOT_VERIFY"):
+            with self.subTest(verdict=verdict):
+                gh = FakeGh(threads=[thread("PRRT_a")])
+                self.assertIn("REVIEW_PUBLICATION=PASS", Run(self, verdict=verdict, gh=gh).go().output)
+                self.assertFalse([c for c in gh.calls if c[0][:3] == ("gh", "api", "graphql")])
+
+    def test_a_failing_thread_query_fails_closed(self):
+        gh = FakeGh()
+        gh.graphql_fails = True
+        self.assertIn("cannot read the pull request's review threads", self.refused(gh))
+
+    def test_an_unresolved_thread_with_an_unknown_author_is_refused(self):
+        message = self.refused(FakeGh(threads=[thread("PRRT_ghost", author=None)]))
+        self.assertIn("PRRT_ghost", message)
+        self.assertIn("cannot be established", message)
+
+    def test_a_resolved_thread_with_an_unknown_author_does_not_block(self):
+        gh = FakeGh(threads=[thread("PRRT_ghost", author=None, resolved=True)])
+        self.assertIn("REVIEW_PUBLICATION=PASS", Run(self, verdict="APPROVE", gh=gh).go().output)
+
+    def test_a_malformed_thread_response_fails_closed(self):
+        for label, reply in (("errors", {"errors": [{"message": "boom"}]}),
+                             ("no pull request", {"data": {"repository": {"pullRequest": None}}}),
+                             ("not an object", []),
+                             ("malformed node", {"data": {"repository": {"pullRequest": {"reviewThreads": {
+                                 "pageInfo": {"hasNextPage": False}, "nodes": [{"id": "PRRT_x"}]}}}}})):
+            with self.subTest(label=label):
+                gh = FakeGh()
+                original = gh._graphql
+                gh._graphql = lambda args, reply=reply: reply
+                self.refused(gh)
+                gh._graphql = original
+
+    def test_the_gate_also_applies_to_a_dry_run(self):
+        gh = FakeGh(threads=[thread("PRRT_a")])
+        self.refused(gh, extra=("--dry-run",))
+
+    def test_the_gate_runs_before_the_evidence_gate(self):
+        self.assertIn("PRRT_a", self.refused(FakeGh(threads=[thread("PRRT_a")]), level="hard"))
 
 
 class PersistedReadBackTest(unittest.TestCase):

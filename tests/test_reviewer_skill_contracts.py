@@ -134,12 +134,52 @@ def test_code_smells_have_operational_definitions_and_blocking_policy() -> None:
     assert "do not hand back" in implement
 
 
+def test_reviewer_owns_and_closes_its_own_threads_before_approving() -> None:
+    basic, hard, devil = read(BASIC), read(HARD), read(DEVIL)
+    firewall, protocol = read(FIREWALL), read("code-review/references/review-state-protocol.md")
+    for phrase in ("Re-review of your own earlier threads", "The reviewer owns its own review threads",
+                   "`reviewThreads`", "gh api graphql", "NEW exact head", "independent reproduction",
+                   "Never rely on the author's handback", "Verified fixed at <short-sha>: <one-line evidence>",
+                   "leave it open and the verdict must be `CHANGES_REQUESTED`",
+                   "Never resolve a thread before you have verified it",
+                   "never resolve a thread authored by anyone else", "`RESOLVED_VERIFIED`", "`OPEN_NOT_FIXED`",
+                   "can supersede an earlier formal review", "latest review of yours at the exact head",
+                   "republish the verdict through the guarded publisher",
+                   "refuses an `APPROVE`, at any level and before any write",
+                   "a missing or non-Boolean `hasNextPage`",
+                   "an unresolved thread's opening author cannot be established",
+                   "there is no override"):
+        assert phrase in basic, phrase
+    for text in (hard, devil):
+        assert "re-review of your own earlier threads" in text
+        assert "resolve only those verified fixed" in text
+    assert "never resolves a thread anyone else authored" in firewall
+    assert "unresolved" in protocol and "own review threads" in protocol
+
+
+def test_the_publisher_enforces_the_own_thread_rule_in_code() -> None:
+    publisher = (SKILLS / "code-review/scripts/publish_review.py").read_text(encoding="utf-8")
+    gate = (SKILLS / "code-review/scripts/review_thread_gate.py").read_text(encoding="utf-8")
+    assert "thread_gate.require_no_own_unresolved_threads" in publisher
+    assert "reviewThreads" in gate and "APPROVE refused" in gate
+
+
 def test_changes_requested_contract_enforces_remediation_rules() -> None:
     text = read("changes-requested/SKILL.md")
     for phrase in ("Never amend or force-push", "Reproduce before fixing", "publish-pr-handback",
                    "fetch_review_findings.py", "do not push to its branch",
                    "never supersedes a blocking verdict", "carry no verdict"):
         assert phrase in text
+
+
+def test_the_author_never_resolves_reviewer_threads() -> None:
+    text = read("changes-requested/SKILL.md")
+    for phrase in ("Never resolve a reviewer's thread", "The reviewer owns its own threads",
+                   "Do not resolve, dismiss, or hide any review thread",
+                   "`review_findings` must list every reviewer thread (its id or `path:line`)",
+                   "fresh exact-head evidence", "Stop and wait for independent re-review",
+                   "leave every reviewer thread unresolved for the reviewer"):
+        assert phrase in text, phrase
 
 
 def test_workspace_cleanup_contract_names_the_workspace_as_the_boundary() -> None:

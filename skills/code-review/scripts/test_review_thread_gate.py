@@ -20,7 +20,7 @@ def reply(nodes, more=False, cursor="c1"):
 class OwnUnresolvedThreadsTest(unittest.TestCase):
     def test_only_the_actors_unresolved_threads_are_returned(self):
         run_json = lambda *args: reply([node("T1"), node("T2", resolved=True), node("T3", author="other"),
-                                        node("T4", author=None)])
+                                        node("T4", author=None, resolved=True)])
         self.assertEqual([t["id"] for t in gate.own_unresolved_threads(run_json, "o/r", 5, "BOT")], ["T1"])
 
     def test_the_query_names_the_repository_pull_request_and_cursor(self):
@@ -49,6 +49,33 @@ class OwnUnresolvedThreadsTest(unittest.TestCase):
                                 ("missing id", lambda *a: reply([{"isResolved": False}]))):
             with self.subTest(label=label), self.assertRaises(gate.ThreadGateError):
                 gate.own_unresolved_threads(run_json, "o/r", 5, "bot")
+
+    def test_an_unresolved_thread_with_an_unknown_opening_author_fails_closed(self):
+        no_comments = {"id": "T9", "isResolved": False, "path": "a.py", "line": 3, "comments": {"nodes": []}}
+        no_connection = {"id": "T9", "isResolved": False, "path": "a.py", "line": 3}
+        for label, bad in (("null author", node("T9", author=None)), ("no comments", no_comments),
+                           ("no comments field", no_connection),
+                           ("blank login", {**node("T9"), "comments": {"nodes": [{"author": {"login": ""}}]}})):
+            with self.subTest(label=label):
+                run_json = lambda *a, bad=bad: reply([node("T1", author="other"), bad])
+                with self.assertRaisesRegex(gate.ThreadGateError, "T9.*cannot be established"):
+                    gate.own_unresolved_threads(run_json, "o/r", 5, "bot")
+
+    def test_a_resolved_thread_with_an_unknown_author_is_irrelevant(self):
+        run_json = lambda *a: reply([node("T1", author=None, resolved=True), node("T2", author="other")])
+        self.assertEqual(gate.own_unresolved_threads(run_json, "o/r", 5, "bot"), [])
+        gate.require_no_own_unresolved_threads(run_json, "o/r", 5, "bot", "APPROVE")
+
+    def test_has_next_page_must_be_an_explicit_boolean(self):
+        def page(**info):
+            return lambda *a: {"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "pageInfo": info, "nodes": [node("T1", author="other")]}}}}}
+
+        for label, info in (("missing", {"endCursor": "c"}), ("null", {"hasNextPage": None}),
+                            ("string", {"hasNextPage": "false"}), ("number", {"hasNextPage": 0})):
+            with self.subTest(label=label), self.assertRaisesRegex(gate.ThreadGateError, "hasNextPage"):
+                gate.own_unresolved_threads(page(**info), "o/r", 5, "bot")
+        self.assertEqual(gate.own_unresolved_threads(page(hasNextPage=False), "o/r", 5, "bot"), [])
 
     def test_a_repository_that_is_not_owner_name_is_rejected(self):
         for repo in ("", "noslash", "a/b/c"):

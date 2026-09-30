@@ -195,7 +195,9 @@ The publisher fails closed when the role policy is missing, the reviewer is the
 PR author, or the live head differs from `--expected-head` before or during
 publication. It also refuses an `APPROVE`, at any level and before any write, while
 unresolved review threads authored by the publishing login remain on the PR, and
-refuses it when that thread query cannot be read; there is no override, and
+refuses it when that thread query cannot be read or is malformed (including a missing
+or non-Boolean `hasNextPage`) or when an unresolved thread's opening author cannot be
+established; there is no override, and
 `CHANGES_REQUESTED` and `CANNOT_VERIFY` are not affected. It creates the formal review, attaches inline comments, and creates
 or updates exactly one PR issue comment containing:
 

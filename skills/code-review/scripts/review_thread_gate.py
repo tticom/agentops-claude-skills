@@ -67,14 +67,22 @@ def _fetch_page(run_json: RunJson, owner: str, name: str, pr: int, cursor: str |
         raise ThreadGateError("the review-thread query returned an unexpected shape") from error
     if not isinstance(nodes, list) or not isinstance(info, dict):
         raise ThreadGateError("the review-thread query returned an unexpected shape")
-    return {"nodes": nodes, "hasNextPage": info.get("hasNextPage"), "endCursor": info.get("endCursor")}
+    # Only an explicit False ends paging and only an explicit True continues it; a missing,
+    # null or non-Boolean value is an unexpected shape, never "the last page".
+    if not isinstance(info.get("hasNextPage"), bool):
+        raise ThreadGateError(
+            f"the review-thread query returned an unexpected shape: hasNextPage is {info.get('hasNextPage')!r}"
+        )
+    return {"nodes": nodes, "hasNextPage": info["hasNextPage"], "endCursor": info.get("endCursor")}
 
 
-def _opening_author(node: dict[str, Any]) -> str:
+def _opening_author(node: dict[str, Any]) -> str | None:
+    """The lower-cased login that opened the thread, or None when it cannot be established."""
     comments = (node.get("comments") or {}).get("nodes")
     if not isinstance(comments, list) or not comments or not isinstance(comments[0], dict):
-        return ""
-    return str((comments[0].get("author") or {}).get("login", "")).lower()
+        return None
+    login = (comments[0].get("author") or {}).get("login")
+    return login.lower() if isinstance(login, str) and login.strip() else None
 
 
 def own_unresolved_threads(run_json: RunJson, repo: str, pr: int, actor: str) -> list[dict[str, Any]]:
@@ -90,7 +98,17 @@ def own_unresolved_threads(run_json: RunJson, repo: str, pr: int, actor: str) ->
             if not isinstance(node, dict) or not isinstance(node.get("isResolved"), bool) \
                     or not isinstance(node.get("id"), str):
                 raise ThreadGateError(f"a review thread is malformed: {str(node)[:120]!r}")
-            if not node["isResolved"] and _opening_author(node) == actor.lower():
+            if node["isResolved"]:
+                continue
+            author = _opening_author(node)
+            if author is None:
+                # Ownership is unknown (a deleted account, or no opening comment): refuse
+                # rather than assume the thread is someone else's.
+                raise ThreadGateError(
+                    f"the author of unresolved review thread {describe(node)} cannot be established "
+                    "(deleted account or no opening comment); refusing to guess its ownership"
+                )
+            if author == actor.lower():
                 found.append(node)
         if page["hasNextPage"] is not True:
             return found

@@ -146,6 +146,8 @@ def test_reviewer_owns_and_closes_its_own_threads_before_approving() -> None:
                    "can supersede an earlier formal review", "latest review of yours at the exact head",
                    "republish the verdict through the guarded publisher",
                    "refuses an `APPROVE`, at any level and before any write",
+                   "a missing or non-Boolean `hasNextPage`",
+                   "an unresolved thread's opening author cannot be established",
                    "there is no override"):
         assert phrase in basic, phrase
     for text in (hard, devil):

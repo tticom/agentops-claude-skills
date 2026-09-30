@@ -428,6 +428,15 @@ class OwnThreadGateTest(unittest.TestCase):
         gh.graphql_fails = True
         self.assertIn("cannot read the pull request's review threads", self.refused(gh))
 
+    def test_an_unresolved_thread_with_an_unknown_author_is_refused(self):
+        message = self.refused(FakeGh(threads=[thread("PRRT_ghost", author=None)]))
+        self.assertIn("PRRT_ghost", message)
+        self.assertIn("cannot be established", message)
+
+    def test_a_resolved_thread_with_an_unknown_author_does_not_block(self):
+        gh = FakeGh(threads=[thread("PRRT_ghost", author=None, resolved=True)])
+        self.assertIn("REVIEW_PUBLICATION=PASS", Run(self, verdict="APPROVE", gh=gh).go().output)
+
     def test_a_malformed_thread_response_fails_closed(self):
         for label, reply in (("errors", {"errors": [{"message": "boom"}]}),
                              ("no pull request", {"data": {"repository": {"pullRequest": None}}}),

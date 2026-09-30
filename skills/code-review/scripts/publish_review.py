@@ -11,6 +11,7 @@ from typing import Any
 
 import gh_publication
 import review_evidence_gate as evidence_gate
+import review_thread_gate as thread_gate
 import role_authority_gate as role_gate
 
 
@@ -234,6 +235,14 @@ def main() -> None:
             policy=policy,
         )
     except role_gate.AuthorityDenied as error:
+        raise SystemExit(f"REVIEW_PUBLICATION=FAIL: {error}") from error
+
+    # The reviewer owns its own threads: an APPROVE is refused while any of them is unresolved.
+    try:
+        thread_gate.require_no_own_unresolved_threads(
+            run_json, args.repo, args.pr, actor, args.verdict
+        )
+    except thread_gate.ThreadGateError as error:
         raise SystemExit(f"REVIEW_PUBLICATION=FAIL: {error}") from error
 
     if args.verdict == "APPROVE" and args.level != "basic":

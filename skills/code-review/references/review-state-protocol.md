@@ -39,6 +39,10 @@ progress.
 Publish only through `scripts/publish_review.py`. It binds the formal review,
 optional inline comments, and mandatory marked PR summary to one exact head.
 
+`APPROVE` is refused while the publishing reviewer's own review threads are
+unresolved; the reviewer verifies, replies to, and resolves them first (see
+`code-review`, re-review of your own earlier threads).
+
 After publishing, re-query formal reviews and issue comments. Require reviewer,
 head, state, timestamp, review ID, summary marker, and summary comment ID to
 match. Do not report `AWAITING_AUTHOR_FIXES` or `READY_FOR_HUMAN_MERGE` until

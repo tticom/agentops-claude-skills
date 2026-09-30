@@ -25,8 +25,10 @@ comments and stop, so authorship and independent review stay separate.
 
 1. **Never amend or force-push** published review heads. Follow-up commits must be
    added on top of the branch.
-2. **Never dismiss or self-resolve** a reviewer finding without a reproducing test
-   and code evidence.
+2. **Never resolve a reviewer's thread.** The reviewer owns its own threads and
+   resolves them itself after verifying the fix at the new head. Do not resolve,
+   dismiss, or hide any review thread, and do not reply "fixed" in its place; never
+   dismiss a reviewer finding without a reproducing test and code evidence.
 3. **Reproduce before fixing**: write a discriminating negative test or minimal
    probe proving the defect on the reviewed head before modifying production code.
 4. **Preserve task boundaries**: fix only the cited defects and adjacent
@@ -163,7 +165,10 @@ worktree, populating `review_findings` with one entry per finding:
 }
 ```
 
+`review_findings` must list every reviewer thread (its id or `path:line`) with the
+fix and fresh exact-head evidence; a thread with no entry has not been addressed.
 Populate `validation_runs` and `acceptance` exactly as `publish-pr-handback`
 requires; the empty lists above only show the shape. Publish with that skill's
 handback publisher, then confirm `AUTHOR_HANDBACK_PUBLICATION=PASS` is
-printed. Stop and wait for independent re-review.
+printed. Stop and wait for independent re-review; leave every reviewer thread
+unresolved for the reviewer.

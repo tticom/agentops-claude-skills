@@ -11,7 +11,9 @@ A reviewer may:
 - create a clean detached review worktree;
 - run read-only analysis and tests;
 - create ephemeral probes and evidence outside the reviewed repository;
-- publish formal reviews, inline review comments, and PR issue comments.
+- publish formal reviews, inline review comments, and PR issue comments;
+- reply to and resolve the review threads it authored itself, once it has verified
+  them fixed at the exact head. It never resolves a thread anyone else authored.
 
 A reviewer must not:
 
@@ -62,7 +64,8 @@ The only durable writes produced by a review are hosting-service review metadata
 
 1. inline comments for line-specific findings when necessary;
 2. one formal review verdict;
-3. one marked PR summary comment on every reviewed head.
+3. one marked PR summary comment on every reviewed head;
+4. replies to, and resolution of, the reviewer's own verified-fixed review threads.
 
 Never store review reports or evidence packets on the PR branch. Temporary
 evidence packets belong outside the repository and may be retained only in a

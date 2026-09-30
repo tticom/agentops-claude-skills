@@ -192,6 +192,11 @@ declared scope before writing any review metadata. For blocking verdicts, omit
 inline findings, and mandatory PR summary comment are published directly to the
 pull request.
 
+Before an `APPROVE`, close your own earlier review threads exactly as `code-review`
+requires (re-review of your own earlier threads): verify each at the new exact head,
+reply, and resolve only those verified fixed; the publisher refuses an approval while
+your own threads remain unresolved.
+
 The reviewer must post all comments and decisions directly to the PR thread. Do
 not substitute chat-only output. Do not add tests, reports, rules, prompts,
 skills, or evidence files to the reviewed branch.

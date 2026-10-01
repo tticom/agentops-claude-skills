@@ -1,8 +1,12 @@
 # SLIM-PROPOSAL: slimming the skills
 
-Status: DRAFT proposal for the maintainer (tticom). Nothing here is applied.
-`main` is untouched and the skills the live framework pins stay as they are.
-This PR only adds this file.
+Status: the maintainer (tticom) has answered the open questions (see the
+companion file, sections 6 and 7). The six consolidated skills are now implemented
+under `lean/skills/` on this branch, beside the old twelve, which are untouched.
+**The cutover has not been executed**; `main` and the skills the live framework
+pins (`c51d446`) are unchanged. `slim-governance` is the long-running trunk of the
+lean experiment, standing in for `main` until the maintainer decides; the draft PR
+is the review surface, not something to merge now.
 
 Companion document (same branch name, other repo):
 [`score2gp-agentops` `SLIM-PROPOSAL.md`](https://github.com/tticom/score2gp-agentops/blob/slim-governance/SLIM-PROPOSAL.md).
@@ -113,18 +117,40 @@ handback code).
    folded into the product repo as a `.claude/skills/` directory, since six
    small skills may not need their own repository.
 
-## 6. Open questions specific to the skills
+## 6. Questions specific to the skills
 
-1. Fold the six remaining skills into the product repo, or keep a separate
-   repo (a separate repo made sense for sharing; going private may not need it)?
-2. Do you want the adversarial review mode on by default for `risky` PRs, or
-   only when you ask?
-3. Should `workspace-cleanup` and `durable-handoff` stay at all, or are they
-   a convenience you would rather drop?
-4. Is Codex still a runtime you want supported (the skills are written to run
-   under both Claude Code and Codex, which costs compatibility work)?
-5. Are the upstream-derived parts (`code-review`, `verified-implementation`)
-   something you want to rewrite independently rather than carry notices?
+1. Fold the six skills into the new private repo (recommended) or keep a separate
+   repo: STILL OPEN (companion file, section 7, item 3).
+2. Adversarial review default: DECIDED by judgement: on for `risky`, off for
+   `normal`.
+3. `workspace-cleanup` and `durable-handoff`: kept; `durable-handoff` is optional
+   and never per-task.
+4. Codex as a runtime: the lean skills are plain markdown plus Python and run under
+   both; no extra compatibility work is planned. STILL OPEN if you want to drop it.
+5. Rewrite the upstream-derived parts independently: STILL OPEN; notices kept.
 
-The ten broader questions (review required or optional, private-repo branch
-protection, history, accounts) are in the companion file, section 6.
+The broader decisions are in the companion file, section 6.
+
+## 7. Implemented on this branch (`lean/skills/`)
+
+| Skill | Built from | Scripts (tested) |
+|---|---|---|
+| `implement` | `verified-implementation` + residue of `governed-development-loop`; smell contract | none |
+| `review` (normal and `--adversarial`) | `code-review` + `devils-advocate-review` + `hard-review` | `verify_review_head.py`, `assertion_smells.py`, `fixture_coupling_scan.py` (+ tests) |
+| `address-review` | `changes-requested`, handback prerequisite removed | `fetch_review_findings.py` (+ tests) |
+| `safe-git` | `identity-safe-git` trimmed: no identity profiles or role policy | new `safe_git_check.py` (+ tests) |
+| `workspace-cleanup` | unchanged copy | `workspace_cleanup.py` (+ tests) |
+| `durable-handoff` | trimmed: optional, no authority fields | none |
+
+Choices made on the maintainer's decisions: review is advisory, published as one PR
+comment that begins with `Review @ <full head SHA> | mode | verdict`, with no
+formal-review publisher, marker summary, readback or thread gate (nothing blocks on
+review; the maintainer merges). The role policy, identity gate and handback
+publisher are gone. `review` keeps the exact-head pin, the two axes, the smell
+contract, and the adversarial evidence protocol. Upstream-derived `review` and
+`implement` keep their MIT `NOTICE.md`.
+
+Run the lean tests per skill directory (basenames collide across skills, so do not
+collect them in one pytest session): `cd lean/skills/<skill>/scripts && python -m pytest`.
+The existing `scripts/validate_skills.py` validates the lean tree when pointed at a
+root that has `skills/` and a README index (used during development).
